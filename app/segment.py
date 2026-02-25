@@ -63,6 +63,7 @@ class PageData:
 
     file_path: str  # absolute path to the image file
     segments: List[Segment] = field(default_factory=list)
+    column_separators: List[float] = field(default_factory=list)  # x-positions of column dividers
     _counter: int = 0  # internal counter for auto-labeling
 
     def next_label(self, offset: int) -> str:

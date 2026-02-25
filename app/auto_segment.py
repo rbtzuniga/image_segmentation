@@ -207,6 +207,74 @@ def estimate_columns(image_path: str) -> int:
     return max(n_columns, 1)
 
 
+def estimate_column_separators(image_path: str, n_columns: int) -> List[float]:
+    """Estimate the x-positions of column separators.
+
+    Uses a vertical projection profile to find the deepest gutters
+    between content bands.  Returns a list of (n_columns - 1) x-positions.
+    Falls back to evenly-spaced positions if detection fails.
+    """
+    if n_columns <= 1:
+        return []
+
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return []
+
+    h, w = img.shape
+    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    col_sums = np.sum(binary, axis=0) / 255
+    kernel_size = max(w // 80, 5) | 1
+    smoothed = np.convolve(col_sums, np.ones(kernel_size) / kernel_size, mode="same")
+
+    n_seps = n_columns - 1
+
+    # Find gutter regions (low ink density)
+    mean_val = np.mean(smoothed)
+    if mean_val < 1:
+        # Fallback: equal spacing
+        return [w * (i + 1) / n_columns for i in range(n_seps)]
+
+    gutter_thresh = mean_val * 0.25
+    margin = int(w * 0.05)
+
+    # Build a "gutter score" — lower ink = deeper gutter
+    # We look for the n_seps deepest gutter valleys in the interior
+    # Widen the search window so we pick the centre of each gutter
+    gutter_window = max(w // 40, 10)
+    # Create a running-minimum-ink array (averaged over a window)
+    gutter_score = np.convolve(
+        smoothed, np.ones(gutter_window) / gutter_window, mode="same"
+    )
+
+    # Mask out margins
+    gutter_score[:margin] = np.inf
+    gutter_score[-margin:] = np.inf
+
+    # Find the n_seps best (lowest-score) gutter positions,
+    # ensuring they are well-separated from each other.
+    separators: List[float] = []
+    min_sep_distance = w // (n_columns * 2)  # at least half a column width apart
+
+    for _ in range(n_seps):
+        idx = int(np.argmin(gutter_score))
+        if gutter_score[idx] == np.inf:
+            break
+        separators.append(float(idx))
+        # Suppress nearby positions
+        lo = max(0, idx - min_sep_distance)
+        hi = min(len(gutter_score), idx + min_sep_distance)
+        gutter_score[lo:hi] = np.inf
+
+    # If we didn't find enough, fill with equal spacing
+    if len(separators) < n_seps:
+        separators = [w * (i + 1) / n_columns for i in range(n_seps)]
+
+    separators.sort()
+    return separators
+
+
 def estimate_columns_sample(file_paths: List[str], max_sample: int = 5) -> int:
     """Estimate column count from a sample of pages (uses the mode)."""
     if not file_paths:
@@ -225,21 +293,51 @@ def _column_sort_key(
     box: Tuple[float, ...],
     n_columns: int,
     img_width: int,
+    separators: List[float] | None = None,
 ) -> Tuple[int, float]:
     """Return (column_index, centroid_y) for column-aware reading order.
 
-    Divides the image width equally into *n_columns* bins and assigns
-    each box to the bin containing its centroid-x.
+    Uses explicit separator positions when available, otherwise divides
+    the image width equally into *n_columns* bins.
     """
-    if n_columns <= 1:
-        cx = box[0] + box[2] / 2.0
-        cy = box[1] + box[3] / 2.0
-        return (0, cy)
-    col_width = img_width / n_columns
     cx = box[0] + box[2] / 2.0
     cy = box[1] + box[3] / 2.0
-    col_idx = min(int(cx / col_width), n_columns - 1)
+    if n_columns <= 1:
+        return (0, cy)
+    col_idx = _column_for_x(cx, n_columns, img_width, separators)
     return (col_idx, cy)
+
+
+def _column_for_x(
+    x: float,
+    n_columns: int,
+    img_width: int,
+    separators: List[float] | None = None,
+) -> int:
+    """Return the 0-based column index for an x-coordinate."""
+    if n_columns <= 1:
+        return 0
+    if separators and len(separators) == n_columns - 1:
+        for i, sx in enumerate(separators):
+            if x < sx:
+                return i
+        return n_columns - 1
+    # Fallback: equal width columns
+    col_width = img_width / n_columns
+    return min(int(x / col_width), n_columns - 1)
+
+
+def _boxes_cross_separator(
+    box: BBox,
+    separators: List[float],
+) -> bool:
+    """Return True if the box spans across any separator line."""
+    bx, _, bw, _ = box
+    left, right = bx, bx + bw
+    for sx in separators:
+        if left < sx < right:
+            return True
+    return False
 
 
 # ── Main detection ───────────────────────────────────────────────────────
@@ -250,6 +348,7 @@ def detect_paragraphs(
     merge_sensitivity: float = 1.0,
     horizontal_reach: float = 1.0,
     n_columns: int = 1,
+    separators: List[float] | None = None,
 ) -> List[BBox]:
     """Detect paragraph-like text blocks in a scanned document image.
 
@@ -264,6 +363,10 @@ def detect_paragraphs(
     n_columns : int
         Expected number of text columns.  Used to cap horizontal dilation
         and set a tighter cross-column gap threshold.
+    separators : list of float, optional
+        Explicit x-positions of column separator lines.  When provided,
+        boxes that span across a separator are never merged, and the
+        separator positions are used for column-aware sorting.
     """
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -359,6 +462,15 @@ def detect_paragraphs(
             if h_gap > max_h_gap:
                 continue
 
+            # Never merge boxes that sit in different columns (across a separator)
+            if separators:
+                cx_a = box_a[0] + box_a[2] / 2.0
+                cx_b = box_b[0] + box_b[2] / 2.0
+                col_a = _column_for_x(cx_a, n_columns, w, separators)
+                col_b = _column_for_x(cx_b, n_columns, w, separators)
+                if col_a != col_b:
+                    continue
+
             h_overlap = _horizontal_overlap(box_a, box_b)
 
             # Merge if: good horizontal overlap (same column, stacked lines)
@@ -408,7 +520,7 @@ def detect_paragraphs(
 
     # Sort in reading order: column by column (left-to-right),
     # then top-to-bottom within each column.
-    result_boxes.sort(key=lambda b: _column_sort_key(b, n_columns, w))
+    result_boxes.sort(key=lambda b: _column_sort_key(b, n_columns, w, separators))
     return result_boxes
 
 
@@ -419,6 +531,7 @@ def auto_segment_page(
     merge_sensitivity: float = 1.0,
     horizontal_reach: float = 1.0,
     n_columns: int = 1,
+    separators: List[float] | None = None,
 ) -> int:
     """Run auto-detection on a single page and add segments.
 
@@ -435,6 +548,7 @@ def auto_segment_page(
         merge_sensitivity=merge_sensitivity,
         horizontal_reach=horizontal_reach,
         n_columns=n_columns,
+        separators=separators,
     )
     added = 0
     for x, y, bw, bh in boxes:
@@ -453,7 +567,10 @@ def auto_segment_page(
     return added
 
 
-def relabel_page(page: PageData, offset: int, n_columns: int = 1) -> None:
+def relabel_page(
+    page: PageData, offset: int, n_columns: int = 1,
+    separators: List[float] | None = None,
+) -> None:
     """Re-label all segments on a page in column-aware reading order.
 
     Assigns each segment to a column bin based on its centroid-x,
@@ -477,10 +594,7 @@ def relabel_page(page: PageData, offset: int, n_columns: int = 1) -> None:
         ys = [v[1] for v in seg.vertices]
         cx = sum(xs) / len(xs)
         cy = sum(ys) / len(ys)
-        if n_columns <= 1:
-            return (0, cy)
-        col_width = img_w / n_columns
-        col_idx = min(int(cx / col_width), n_columns - 1)
+        col_idx = _column_for_x(cx, n_columns, img_w, separators)
         return (col_idx, cy)
 
     page.segments.sort(key=_seg_sort_key)

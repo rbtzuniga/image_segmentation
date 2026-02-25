@@ -31,6 +31,9 @@ FILL_COLOR = QColor(0, 120, 215, 40)
 FILL_COLOR_SELECTED = QColor(255, 80, 80, 50)
 LABEL_COLOR = QColor(255, 255, 255)
 LABEL_BG = QColor(0, 120, 215, 180)
+SEPARATOR_COLOR = QColor(0, 180, 60, 160)
+SEPARATOR_COLOR_ACTIVE = QColor(0, 220, 80, 220)
+SEPARATOR_HIT_TOLERANCE = 8  # pixels (screen) for grabbing a separator
 
 
 class CanvasView(QGraphicsView):
@@ -39,6 +42,7 @@ class CanvasView(QGraphicsView):
     segments_changed = pyqtSignal()  # Emitted whenever segments are added / moved / deleted
     segment_selected = pyqtSignal(int)  # index of selected segment (-1 = none)
     tool_switched = pyqtSignal(str)  # Emitted when tool changes via canvas interaction (e.g. right-click)
+    separators_changed = pyqtSignal()  # Emitted when column separators are moved
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -64,6 +68,7 @@ class CanvasView(QGraphicsView):
         self._panning: bool = False
         self._pan_start: Optional[QPointF] = None
         self._offset: int = 0
+        self._dragging_separator: int = -1  # index of separator being dragged (-1 = none)
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -112,6 +117,16 @@ class CanvasView(QGraphicsView):
             self.segment_selected.emit(-1)
             self.viewport().update()
 
+    def _separator_at(self, img_x: float) -> int:
+        """Return index of column separator near img_x, or -1."""
+        if not self._page_data or not self._page_data.column_separators:
+            return -1
+        tol = SEPARATOR_HIT_TOLERANCE / max(self._zoom, 0.01)
+        for i, sx in enumerate(self._page_data.column_separators):
+            if abs(img_x - sx) <= tol:
+                return i
+        return -1
+
     # ── zoom ─────────────────────────────────────────────────────────────
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
@@ -149,6 +164,13 @@ class CanvasView(QGraphicsView):
         img_x, img_y = pos.x(), pos.y()
 
         if self._tool == "select":
+            # Check separator hit first
+            sep_idx = self._separator_at(img_x)
+            if sep_idx >= 0:
+                self._dragging_separator = sep_idx
+                self.setCursor(Qt.CursorShape.SplitHCursor)
+                return
+
             # Check vertex hit first (on active segment)
             if self._active_segment_idx >= 0:
                 seg = self._page_data.segments[self._active_segment_idx]
@@ -205,6 +227,16 @@ class CanvasView(QGraphicsView):
             self.segments_changed.emit()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._dragging_separator >= 0 and self._page_data:
+            pos = self.mapToScene(event.pos())
+            new_x = pos.x()
+            # Clamp to image bounds
+            if self._pixmap_item:
+                new_x = max(0.0, min(new_x, self._pixmap_item.pixmap().width()))
+            self._page_data.column_separators[self._dragging_separator] = new_x
+            self.viewport().update()
+            return
+
         if self._panning and self._pan_start is not None:
             delta = event.pos() - self._pan_start
             self._pan_start = event.pos()
@@ -247,6 +279,17 @@ class CanvasView(QGraphicsView):
                 )
 
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._dragging_separator >= 0:
+                self._dragging_separator = -1
+                # Re-sort separators after drag
+                if self._page_data:
+                    self._page_data.column_separators.sort()
+                    self.separators_changed.emit()
+                self.setCursor(
+                    Qt.CursorShape.CrossCursor if self._tool == "segment" else Qt.CursorShape.ArrowCursor
+                )
+                self.viewport().update()
+                return
             if self._drawing:
                 self._drawing = False
                 self._draw_origin = None
@@ -273,6 +316,22 @@ class CanvasView(QGraphicsView):
 
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Draw column separators
+        if self._page_data.column_separators and self._pixmap_item:
+            img_h = self._pixmap_item.pixmap().height()
+            for i, sep_x in enumerate(self._page_data.column_separators):
+                top = QPointF(self.mapFromScene(QPointF(sep_x, 0)))
+                bot = QPointF(self.mapFromScene(QPointF(sep_x, img_h)))
+                is_active = i == self._dragging_separator
+                pen = QPen(SEPARATOR_COLOR_ACTIVE if is_active else SEPARATOR_COLOR, 2)
+                pen.setCosmetic(True)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+                painter.drawLine(top, bot)
+                # Small handle at top
+                painter.setBrush(QBrush(SEPARATOR_COLOR_ACTIVE if is_active else SEPARATOR_COLOR))
+                painter.drawEllipse(top, 5, 5)
 
         for i, seg in enumerate(self._page_data.segments):
             if len(seg.vertices) != 4:

@@ -274,6 +274,11 @@ class SettingsPanel(QWidget):
     def n_columns(self, value: int) -> None:
         self._spin_columns.setValue(max(1, min(value, 10)))
 
+    @property
+    def columns_spin(self) -> QSpinBox:
+        """Expose the columns spinner for signal connections."""
+        return self._spin_columns
+
     def set_segment_label(self, label: str | None) -> None:
         """Update the label editor with the currently selected segment's label."""
         if label is None:

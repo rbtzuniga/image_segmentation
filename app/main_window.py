@@ -14,7 +14,12 @@ from PyQt6.QtWidgets import (
     QSplitter,
 )
 
-from app.auto_segment import auto_segment_page, estimate_columns_sample, relabel_page
+from app.auto_segment import (
+    auto_segment_page,
+    estimate_columns_sample,
+    estimate_column_separators,
+    relabel_page,
+)
 from app.canvas import CanvasView
 from app.export import export_all
 from app.segment import PageData
@@ -89,6 +94,9 @@ class MainWindow(QMainWindow):
         # Label edit committed
         self._settings.label_edit.editingFinished.connect(self._on_label_edited)
 
+        # Re-estimate separators when column count changes
+        self._settings.columns_spin.valueChanged.connect(self._on_columns_changed)
+
     # ── slots ────────────────────────────────────────────────────────────
 
     def _on_folder_loaded(self, file_paths: list) -> None:
@@ -102,6 +110,8 @@ class MainWindow(QMainWindow):
         if file_paths:
             est = estimate_columns_sample(file_paths)
             self._settings.n_columns = est
+            # Estimate separator positions for every page
+            self._estimate_all_separators(est)
             self._status.showMessage(
                 f"Loaded {total} page{'s' if total != 1 else ''} "
                 f"(estimated {est} column{'s' if est != 1 else ''})."
@@ -153,13 +163,34 @@ class MainWindow(QMainWindow):
             n_columns=self._settings.n_columns,
         )
 
+    def _current_separators(self) -> list:
+        """Return column separators for the current page."""
+        page = self._canvas.current_page_data()
+        if page and page.column_separators:
+            return page.column_separators
+        return []
+
+    def _estimate_all_separators(self, n_columns: int) -> None:
+        """Estimate separator positions for all loaded pages."""
+        for path in self._ordered_paths:
+            page = self._pages[path]
+            page.column_separators = estimate_column_separators(path, n_columns)
+
+    def _on_columns_changed(self, n_columns: int) -> None:
+        """Re-estimate separators for all pages when the column spinner changes."""
+        self._estimate_all_separators(n_columns)
+        self._canvas.viewport().update()
+
     def _on_auto_segment_page(self) -> None:
         page = self._canvas.current_page_data()
         if not page:
             QMessageBox.warning(self, "No Page", "Please select a page first.")
             return
         offset = self._settings.offset
-        added = auto_segment_page(page, offset, **self._auto_params())
+        added = auto_segment_page(
+            page, offset, **self._auto_params(),
+            separators=page.column_separators or None,
+        )
         self._canvas.viewport().update()
         self._canvas.segments_changed.emit()
         self._status.showMessage(
@@ -175,7 +206,10 @@ class MainWindow(QMainWindow):
         total = 0
         for path in self._ordered_paths:
             page = self._pages[path]
-            total += auto_segment_page(page, offset, **params)
+            total += auto_segment_page(
+                page, offset, **params,
+                separators=page.column_separators or None,
+            )
         self._canvas.viewport().update()
         self._canvas.segments_changed.emit()
         self._status.showMessage(
@@ -204,7 +238,8 @@ class MainWindow(QMainWindow):
             return
         offset = self._settings.offset
         n_columns = self._settings.n_columns
-        relabel_page(page, offset, n_columns)
+        relabel_page(page, offset, n_columns,
+                     separators=page.column_separators or None)
         self._canvas.select_segment(-1)
         self._canvas.viewport().update()
         self._canvas.segments_changed.emit()
