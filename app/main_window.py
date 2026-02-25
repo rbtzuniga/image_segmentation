@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
 )
 
+from app.auto_segment import auto_segment_page, estimate_columns_sample, relabel_page
 from app.canvas import CanvasView
 from app.export import export_all
 from app.segment import PageData
@@ -72,7 +73,12 @@ class MainWindow(QMainWindow):
         self._settings.tool_changed.connect(self._canvas.set_tool)
         self._settings.offset_changed.connect(self._canvas.set_offset)
         self._settings.save_all_clicked.connect(self._on_save_all)
+        self._settings.auto_segment_page_clicked.connect(self._on_auto_segment_page)
+        self._settings.auto_segment_all_clicked.connect(self._on_auto_segment_all)
+        self._settings.relabel_page_clicked.connect(self._on_relabel_page)
         self._settings.delete_segment_clicked.connect(self._canvas.delete_selected_segment)
+        self._settings.delete_all_page_clicked.connect(self._on_delete_all_page)
+        self._settings.delete_all_all_clicked.connect(self._on_delete_all_all)
         self._settings.fit_button.clicked.connect(self._canvas.fit_view)
 
         # Canvas → settings (label editing)
@@ -91,7 +97,17 @@ class MainWindow(QMainWindow):
         for fp in file_paths:
             self._pages[fp] = PageData(file_path=fp)
         total = len(file_paths)
-        self._status.showMessage(f"Loaded {total} page{'s' if total != 1 else ''}.")
+
+        # Estimate column count from a sample of pages
+        if file_paths:
+            est = estimate_columns_sample(file_paths)
+            self._settings.n_columns = est
+            self._status.showMessage(
+                f"Loaded {total} page{'s' if total != 1 else ''} "
+                f"(estimated {est} column{'s' if est != 1 else ''})."
+            )
+        else:
+            self._status.showMessage(f"Loaded {total} page{'s' if total != 1 else ''}.")
 
     def _on_page_selected(self, index: int) -> None:
         if 0 <= index < len(self._ordered_paths):
@@ -127,6 +143,87 @@ class MainWindow(QMainWindow):
             if new_label:
                 page.segments[seg_idx].label = new_label
                 self._canvas.viewport().update()
+
+    def _auto_params(self) -> dict:
+        """Collect auto-segment tuning parameters from the settings panel."""
+        return dict(
+            min_lines=self._settings.min_lines,
+            merge_sensitivity=self._settings.merge_sensitivity,
+            horizontal_reach=self._settings.horizontal_reach,
+            n_columns=self._settings.n_columns,
+        )
+
+    def _on_auto_segment_page(self) -> None:
+        page = self._canvas.current_page_data()
+        if not page:
+            QMessageBox.warning(self, "No Page", "Please select a page first.")
+            return
+        offset = self._settings.offset
+        added = auto_segment_page(page, offset, **self._auto_params())
+        self._canvas.viewport().update()
+        self._canvas.segments_changed.emit()
+        self._status.showMessage(
+            f"Auto-detected {added} segment{'s' if added != 1 else ''} on page {self._current_page_idx + 1}."
+        )
+
+    def _on_auto_segment_all(self) -> None:
+        if not self._ordered_paths:
+            QMessageBox.warning(self, "No Pages", "Please load a folder first.")
+            return
+        offset = self._settings.offset
+        params = self._auto_params()
+        total = 0
+        for path in self._ordered_paths:
+            page = self._pages[path]
+            total += auto_segment_page(page, offset, **params)
+        self._canvas.viewport().update()
+        self._canvas.segments_changed.emit()
+        self._status.showMessage(
+            f"Auto-detected {total} segment{'s' if total != 1 else ''} across {len(self._ordered_paths)} pages."
+        )
+
+    def _on_delete_all_page(self) -> None:
+        page = self._canvas.current_page_data()
+        if not page:
+            return
+        page.segments.clear()
+        self._canvas.select_segment(-1)
+        self._canvas.segments_changed.emit()
+        self._canvas.viewport().update()
+        self._status.showMessage(
+            f"Deleted all segments on page {self._current_page_idx + 1}."
+        )
+
+    def _on_relabel_page(self) -> None:
+        page = self._canvas.current_page_data()
+        if not page:
+            QMessageBox.warning(self, "No Page", "Please select a page first.")
+            return
+        if not page.segments:
+            QMessageBox.information(self, "No Segments", "There are no segments to relabel.")
+            return
+        offset = self._settings.offset
+        n_columns = self._settings.n_columns
+        relabel_page(page, offset, n_columns)
+        self._canvas.select_segment(-1)
+        self._canvas.viewport().update()
+        self._canvas.segments_changed.emit()
+        self._status.showMessage(
+            f"Relabelled {len(page.segments)} segment{'s' if len(page.segments) != 1 else ''} "
+            f"on page {self._current_page_idx + 1}."
+        )
+
+    def _on_delete_all_all(self) -> None:
+        total = 0
+        for page in self._pages.values():
+            total += len(page.segments)
+            page.segments.clear()
+        self._canvas.select_segment(-1)
+        self._canvas.segments_changed.emit()
+        self._canvas.viewport().update()
+        self._status.showMessage(
+            f"Deleted {total} segment{'s' if total != 1 else ''} across all pages."
+        )
 
     def _on_save_all(self) -> None:
         output = self._settings.output_folder
