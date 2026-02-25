@@ -28,6 +28,7 @@ class SettingsPanel(QWidget):
     delete_all_all_clicked = pyqtSignal()
     auto_segment_page_clicked = pyqtSignal()
     auto_segment_all_clicked = pyqtSignal()
+    relabel_page_clicked = pyqtSignal()
     tool_changed = pyqtSignal(str)  # "select" | "segment"
     offset_changed = pyqtSignal(int)
     output_folder_changed = pyqtSignal(str)
@@ -145,6 +146,16 @@ class SettingsPanel(QWidget):
         minlines_row.addWidget(self._lbl_minlines)
         auto_form.addRow("Min lines:", minlines_row)
 
+        # Column count (per-page expected columns)
+        self._spin_columns = QSpinBox()
+        self._spin_columns.setRange(1, 10)
+        self._spin_columns.setValue(1)
+        self._spin_columns.setToolTip(
+            "Expected number of text columns per page.\n"
+            "Auto-estimated when a folder is loaded."
+        )
+        auto_form.addRow("Columns:", self._spin_columns)
+
         self._btn_reset_tuning = QPushButton("Reset to Defaults")
         self._btn_reset_tuning.clicked.connect(self._reset_tuning)
         auto_form.addRow(self._btn_reset_tuning)
@@ -164,6 +175,14 @@ class SettingsPanel(QWidget):
         self._btn_auto_all = QPushButton("Auto Segment All Pages")
         self._btn_auto_all.clicked.connect(self.auto_segment_all_clicked.emit)
         auto_action_layout.addWidget(self._btn_auto_all)
+
+        self._btn_relabel = QPushButton("Relabel Page")
+        self._btn_relabel.setToolTip(
+            "Re-label all segments on the current page\n"
+            "in column-aware reading order."
+        )
+        self._btn_relabel.clicked.connect(self.relabel_page_clicked.emit)
+        auto_action_layout.addWidget(self._btn_relabel)
 
         layout.addWidget(auto_action_group)
 
@@ -245,6 +264,15 @@ class SettingsPanel(QWidget):
     def min_lines(self) -> int:
         """Minimum text lines for a block to be kept."""
         return self._slider_minlines.value()
+
+    @property
+    def n_columns(self) -> int:
+        """Expected number of text columns per page."""
+        return self._spin_columns.value()
+
+    @n_columns.setter
+    def n_columns(self, value: int) -> None:
+        self._spin_columns.setValue(max(1, min(value, 10)))
 
     def set_segment_label(self, label: str | None) -> None:
         """Update the label editor with the currently selected segment's label."""

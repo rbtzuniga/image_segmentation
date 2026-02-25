@@ -11,6 +11,7 @@ Bottom-up approach:
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import List, Tuple
 
 import cv2
@@ -105,6 +106,19 @@ def _estimate_line_height(binary: np.ndarray) -> Tuple[int, int]:
     return med_line, threshold_gap
 
 
+def _horizontal_gap(a: BBox, b: BBox) -> float:
+    """Horizontal gap between two boxes (negative = overlap)."""
+    ax, _, aw, _ = a
+    bx, _, bw, _ = b
+    a_right = ax + aw
+    b_right = bx + bw
+    # gap from right edge of left box to left edge of right box
+    if ax < bx:
+        return bx - a_right
+    else:
+        return ax - b_right
+
+
 def _horizontal_overlap(a: BBox, b: BBox) -> float:
     """Return the horizontal overlap ratio between two boxes (0–1)."""
     ax, _, aw, _ = a
@@ -131,6 +145,103 @@ def _vertical_gap(a: BBox, b: BBox) -> float:
     return b_top - a_bot
 
 
+# ── Column estimation ────────────────────────────────────────────────────
+
+def estimate_columns(image_path: str) -> int:
+    """Estimate the number of text columns in a scanned document image.
+
+    Uses a vertical projection profile: columns are separated by gutters
+    (vertical bands with very little ink).  The number of distinct content
+    bands equals the number of columns.
+
+    Returns 1 if estimation fails or the image has a single column.
+    """
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return 1
+
+    h, w = img.shape
+    # Binarise – invert so text = white
+    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Vertical projection: sum each column of pixels
+    col_sums = np.sum(binary, axis=0) / 255  # number of text pixels per column
+
+    # Smooth the profile to ignore small noise
+    kernel_size = max(w // 80, 5) | 1  # odd number
+    smoothed = np.convolve(col_sums, np.ones(kernel_size) / kernel_size, mode="same")
+
+    # Threshold: columns with ink density below a fraction of the mean are "gutter"
+    mean_val = np.mean(smoothed)
+    if mean_val < 1:
+        return 1
+    gutter_thresh = mean_val * 0.15
+
+    is_content = smoothed > gutter_thresh
+
+    # Trim margins: ignore the outer 5% on each side
+    margin = int(w * 0.05)
+    is_content[:margin] = False
+    is_content[-margin:] = False
+
+    # Count content runs (each run = one column)
+    n_columns = 0
+    in_run = False
+    run_width = 0
+    min_run_width = max(w // 30, 10)  # columns must be at least this wide
+
+    for val in is_content:
+        if val and not in_run:
+            in_run = True
+            run_width = 1
+        elif val and in_run:
+            run_width += 1
+        elif not val and in_run:
+            if run_width >= min_run_width:
+                n_columns += 1
+            in_run = False
+            run_width = 0
+    if in_run and run_width >= min_run_width:
+        n_columns += 1
+
+    return max(n_columns, 1)
+
+
+def estimate_columns_sample(file_paths: List[str], max_sample: int = 5) -> int:
+    """Estimate column count from a sample of pages (uses the mode)."""
+    if not file_paths:
+        return 1
+    import random
+    sample = file_paths if len(file_paths) <= max_sample else random.sample(file_paths, max_sample)
+    counts = [estimate_columns(p) for p in sample]
+    if not counts:
+        return 1
+    # Return the mode (most common value)
+    from collections import Counter
+    return Counter(counts).most_common(1)[0][0]
+
+
+def _column_sort_key(
+    box: Tuple[float, ...],
+    n_columns: int,
+    img_width: int,
+) -> Tuple[int, float]:
+    """Return (column_index, centroid_y) for column-aware reading order.
+
+    Divides the image width equally into *n_columns* bins and assigns
+    each box to the bin containing its centroid-x.
+    """
+    if n_columns <= 1:
+        cx = box[0] + box[2] / 2.0
+        cy = box[1] + box[3] / 2.0
+        return (0, cy)
+    col_width = img_width / n_columns
+    cx = box[0] + box[2] / 2.0
+    cy = box[1] + box[3] / 2.0
+    col_idx = min(int(cx / col_width), n_columns - 1)
+    return (col_idx, cy)
+
+
 # ── Main detection ───────────────────────────────────────────────────────
 
 def detect_paragraphs(
@@ -138,6 +249,7 @@ def detect_paragraphs(
     min_lines: int = 2,
     merge_sensitivity: float = 1.0,
     horizontal_reach: float = 1.0,
+    n_columns: int = 1,
 ) -> List[BBox]:
     """Detect paragraph-like text blocks in a scanned document image.
 
@@ -149,6 +261,9 @@ def detect_paragraphs(
         Multiplier for vertical merge gap (>1 = merge more, <1 = split more).
     horizontal_reach : float
         Multiplier for horizontal dilation (>1 = merge wider, <1 = tighter).
+    n_columns : int
+        Expected number of text columns.  Used to cap horizontal dilation
+        and set a tighter cross-column gap threshold.
     """
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -163,8 +278,13 @@ def detect_paragraphs(
     line_h, line_gap = _estimate_line_height(binary)
 
     # 3. Light horizontal dilation to merge characters into words/short phrases
-    #    Keep it small so it doesn't bridge columns.
-    h_kern_w = max(int(line_h * horizontal_reach), 8)
+    #    Use half the line height — enough to connect characters within a word
+    #    but NOT enough to bridge column gutters.
+    #    When column count is known, cap the kernel to stay within a single column.
+    h_kern_w = max(int(line_h * 0.5 * horizontal_reach), 5)
+    if n_columns > 1:
+        col_width = w // n_columns
+        h_kern_w = min(h_kern_w, max(col_width // 6, 5))
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kern_w, 1))
     word_mask = cv2.dilate(binary, h_kernel, iterations=1)
 
@@ -191,18 +311,25 @@ def detect_paragraphs(
 
     # 5. Cluster word-boxes into paragraph blocks via Union-Find.
     #    Two boxes belong to the same paragraph if:
-    #    - They overlap horizontally by ≥ 30%
+    #    - They overlap horizontally by ≥ 30% (or horizontal gap is small)
     #    - Their vertical gap is small (within normal line spacing)
-    #
-    #    The key threshold: use the measured inter-line gap (within paragraphs)
-    #    plus a small margin — NOT the full line height.  This ensures that
-    #    the blank line separating entries (≈ 1 line_h) breaks the cluster.
+    #    - They are NOT separated by a wide horizontal gap (column gutter)
     n = len(word_boxes)
     uf = _UF(n)
 
-    # Allow merging if vertical gap ≤ threshold_gap (already computed
-    # as the midpoint between within-entry and between-entry gaps)
+    # Allow merging if vertical gap ≤ threshold_gap
     max_v_gap = int((line_gap + max(line_gap // 3, 2)) * merge_sensitivity)
+
+    # Maximum horizontal gap to allow merging — if boxes are farther apart
+    # horizontally than this, they're in different columns.
+    # When column count is known, use a fraction of the expected column width
+    # so we never merge across gutters.
+    if n_columns > 1:
+        col_width = w // n_columns
+        max_h_gap = min(int(line_h * 2 * horizontal_reach),
+                        int(col_width * 0.3))
+    else:
+        max_h_gap = int(line_h * 2 * horizontal_reach)
 
     # Sort by y for efficient pairwise comparison
     sorted_indices = sorted(range(n), key=lambda i: word_boxes[i][1])
@@ -227,12 +354,22 @@ def detect_paragraphs(
             if v_gap > max_v_gap:
                 continue
 
+            # Check horizontal proximity — reject if boxes are in different columns
+            h_gap = _horizontal_gap(box_a, box_b)
+            if h_gap > max_h_gap:
+                continue
+
             h_overlap = _horizontal_overlap(box_a, box_b)
+
+            # Merge if: good horizontal overlap (same column, stacked lines)
             if h_overlap >= 0.3:
+                uf.union(i, j)
+            # OR: boxes vertically overlap/touch AND are horizontally close
+            # (catches small labels like "R", "S" sitting just left of an entry)
+            elif v_gap <= 0 and h_gap <= line_h * 1.5:
                 uf.union(i, j)
 
     # 6. Build merged bounding boxes for each cluster
-    from collections import defaultdict
     clusters: dict[int, List[int]] = defaultdict(list)
     for i in range(n):
         clusters[uf.find(i)].append(i)
@@ -269,8 +406,9 @@ def detect_paragraphs(
         bh = min(h - by, bh + 2 * pad)
         result_boxes.append((bx, by, bw, bh))
 
-    # Sort top-to-bottom, then left-to-right
-    result_boxes.sort(key=lambda b: (b[1], b[0]))
+    # Sort in reading order: column by column (left-to-right),
+    # then top-to-bottom within each column.
+    result_boxes.sort(key=lambda b: _column_sort_key(b, n_columns, w))
     return result_boxes
 
 
@@ -280,16 +418,23 @@ def auto_segment_page(
     min_lines: int = 2,
     merge_sensitivity: float = 1.0,
     horizontal_reach: float = 1.0,
+    n_columns: int = 1,
 ) -> int:
     """Run auto-detection on a single page and add segments.
 
+    Clears any existing segments on the page before detection.
     Returns the number of new segments added.
     """
+    # Clear existing segments and reset counter
+    page.segments.clear()
+    page._counter = 0
+
     boxes = detect_paragraphs(
         page.file_path,
         min_lines=min_lines,
         merge_sensitivity=merge_sensitivity,
         horizontal_reach=horizontal_reach,
+        n_columns=n_columns,
     )
     added = 0
     for x, y, bw, bh in boxes:
@@ -306,3 +451,41 @@ def auto_segment_page(
         page.segments.append(seg)
         added += 1
     return added
+
+
+def relabel_page(page: PageData, offset: int, n_columns: int = 1) -> None:
+    """Re-label all segments on a page in column-aware reading order.
+
+    Assigns each segment to a column bin based on its centroid-x,
+    then sorts by (column_index, centroid_y) and assigns sequential labels.
+    """
+    if not page.segments:
+        return
+
+    # Determine image width from the first segment (or read image header)
+    try:
+        img = cv2.imread(page.file_path, cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            img_w = img.shape[1]
+        else:
+            img_w = 1
+    except Exception:
+        img_w = 1
+
+    def _seg_sort_key(seg: Segment) -> Tuple[int, float]:
+        xs = [v[0] for v in seg.vertices]
+        ys = [v[1] for v in seg.vertices]
+        cx = sum(xs) / len(xs)
+        cy = sum(ys) / len(ys)
+        if n_columns <= 1:
+            return (0, cy)
+        col_width = img_w / n_columns
+        col_idx = min(int(cx / col_width), n_columns - 1)
+        return (col_idx, cy)
+
+    page.segments.sort(key=_seg_sort_key)
+
+    # Reassign labels starting from offset
+    page._counter = 0
+    for seg in page.segments:
+        seg.label = page.next_label(offset)
