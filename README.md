@@ -2,6 +2,10 @@
 
 A Python GUI application for segmenting scanned document images into labeled regions. Supports automatic paragraph detection, column-aware labeling, and manual editing of quadrilateral segments.
 
+## Demo
+Here's a quick demo of the tool in action: 
+[Demo](https://www.dropbox.com/scl/fi/92zzuju8zt55cw2e8xuoj/img_seg_usage.mp4?rlkey=ua4o2ci2z8m5hz4tk5p77b8ms&st=nlp52qdg&dl=0)
+
 ## Features
 
 - Load all images from a folder (PNG, JPG, TIFF, BMP)
@@ -9,11 +13,16 @@ A Python GUI application for segmenting scanned document images into labeled reg
 - Draw rectangular segments on each page, then adjust vertices to form arbitrary quadrilaterals
 - **Auto-segment** – automatic paragraph/block detection with tunable parameters
 - **Column-aware labeling** – segments are labeled in reading order (column by column, top to bottom)
+- **Column separators** – visual draggable separator lines between columns; supports tilted separators for skewed scans
 - **Relabel Page** – reassign labels to existing segments in reading order
+- **Split segment** – split a selected segment horizontally into top/bottom halves
+- **Edge dragging** – drag any edge of a selected segment to resize it with parallel movement
 - Configurable label offset – new segments get labels `offset + i`
 - Manually edit segment labels at any time
 - Right-click to toggle between Select and Segment tools
 - Delete/Backspace to remove selected segment
+- Press **S** to split the selected segment
+- Press **R** to relabel the current page
 - Middle-click or left-click on empty space to pan the canvas
 - Export all segments as cropped images with configurable format (PNG / JPG / TIFF) and filename prefix
 
@@ -66,7 +75,31 @@ Click **Reset to Defaults** to restore all sliders to their original values.
 
 ### Relabeling
 
-After manually adding, deleting, or rearranging segments, click **Relabel Page** to reassign labels in column-aware reading order (left-to-right by column, top-to-bottom within each column), starting from the current label offset.
+After manually adding, deleting, or rearranging segments, click **Relabel Page (press R)** or press **R** to reassign labels in column-aware reading order (left-to-right by column, top-to-bottom within each column), starting from the current label offset.
+
+### Splitting segments
+
+Select a segment and click **Split Selected Segment (press S)** or press **S** to split it horizontally at its vertical midpoint, creating a top half and a bottom half.
+
+### Column separators
+
+When a folder is loaded, column separators are auto-estimated from the vertical projection profile. You can:
+
+- **Drag the line body** to shift a separator horizontally.
+- **Drag an endpoint handle** (top or bottom) to tilt the separator for skewed scans.
+- Separators prevent auto-segment from merging blocks across columns.
+
+### Edge & vertex dragging
+
+In **Select** mode with a segment selected:
+
+- **Drag a vertex** (corner) to reshape the quadrilateral.
+- **Hover near an edge** to see a directional resize cursor; drag to move that edge with parallel movement.
+
+### UI color coding
+
+- **Light blue** buttons – auto-segment actions (Auto Segment Page, Auto Segment All Pages, Relabel Page)
+- **Light red** buttons – destructive actions (Delete Selected, Delete All Page, Delete All Pages)
 
 ### Keyboard & mouse shortcuts
 
@@ -74,6 +107,8 @@ After manually adding, deleting, or rearranging segments, click **Relabel Page**
 |---|---|
 | Toggle Select / Segment tool | Right-click |
 | Delete selected segment | Delete or Backspace |
+| Split selected segment | S |
+| Relabel current page | R |
 | Pan canvas | Middle-click drag, or left-click drag on empty space (Select mode) |
 | Zoom | Scroll wheel |
 

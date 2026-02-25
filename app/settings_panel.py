@@ -75,7 +75,7 @@ class SettingsPanel(QWidget):
         self._edit_label.setEnabled(False)
         form.addRow("Edit label:", self._edit_label)
 
-        self._btn_split = QPushButton("Split Selected Segment")
+        self._btn_split = QPushButton("Split Selected Segment  (press S)")
         self._btn_split.setToolTip(
             "Split the selected segment horizontally in half,\n"
             "creating a top and bottom segment."
@@ -191,7 +191,7 @@ class SettingsPanel(QWidget):
         self._btn_auto_all.clicked.connect(self.auto_segment_all_clicked.emit)
         auto_action_layout.addWidget(self._btn_auto_all)
 
-        self._btn_relabel = QPushButton("Relabel Page")
+        self._btn_relabel = QPushButton("Relabel Page  (press R)")
         self._btn_relabel.setStyleSheet(_auto_btn_style)
         self._btn_relabel.setToolTip(
             "Re-label all segments on the current page\n"

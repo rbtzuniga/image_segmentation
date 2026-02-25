@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         self._settings.relabel_page_clicked.connect(self._on_relabel_page)
         self._settings.delete_segment_clicked.connect(self._canvas.delete_selected_segment)
         self._settings.split_segment_clicked.connect(self._canvas.split_selected_segment)
+        self._canvas.relabel_requested.connect(self._on_relabel_page)
         self._settings.delete_all_page_clicked.connect(self._on_delete_all_page)
         self._settings.delete_all_all_clicked.connect(self._on_delete_all_all)
         self._settings.fit_button.clicked.connect(self._canvas.fit_view)

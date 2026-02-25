@@ -43,6 +43,7 @@ class CanvasView(QGraphicsView):
     segment_selected = pyqtSignal(int)  # index of selected segment (-1 = none)
     tool_switched = pyqtSignal(str)  # Emitted when tool changes via canvas interaction (e.g. right-click)
     separators_changed = pyqtSignal()  # Emitted when column separators are moved
+    relabel_requested = pyqtSignal()  # Emitted when user presses R
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -492,6 +493,10 @@ class CanvasView(QGraphicsView):
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.delete_selected_segment()
+        elif event.key() == Qt.Key.Key_S:
+            self.split_selected_segment()
+        elif event.key() == Qt.Key.Key_R:
+            self.relabel_requested.emit()
         else:
             super().keyPressEvent(event)
 
