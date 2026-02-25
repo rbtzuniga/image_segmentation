@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
 )
 
+from app.auto_segment import auto_segment_page
 from app.canvas import CanvasView
 from app.export import export_all
 from app.segment import PageData
@@ -72,6 +73,8 @@ class MainWindow(QMainWindow):
         self._settings.tool_changed.connect(self._canvas.set_tool)
         self._settings.offset_changed.connect(self._canvas.set_offset)
         self._settings.save_all_clicked.connect(self._on_save_all)
+        self._settings.auto_segment_page_clicked.connect(self._on_auto_segment_page)
+        self._settings.auto_segment_all_clicked.connect(self._on_auto_segment_all)
         self._settings.delete_segment_clicked.connect(self._canvas.delete_selected_segment)
         self._settings.fit_button.clicked.connect(self._canvas.fit_view)
 
@@ -127,6 +130,34 @@ class MainWindow(QMainWindow):
             if new_label:
                 page.segments[seg_idx].label = new_label
                 self._canvas.viewport().update()
+
+    def _on_auto_segment_page(self) -> None:
+        page = self._canvas.current_page_data()
+        if not page:
+            QMessageBox.warning(self, "No Page", "Please select a page first.")
+            return
+        offset = self._settings.offset
+        added = auto_segment_page(page, offset)
+        self._canvas.viewport().update()
+        self._canvas.segments_changed.emit()
+        self._status.showMessage(
+            f"Auto-detected {added} segment{'s' if added != 1 else ''} on page {self._current_page_idx + 1}."
+        )
+
+    def _on_auto_segment_all(self) -> None:
+        if not self._ordered_paths:
+            QMessageBox.warning(self, "No Pages", "Please load a folder first.")
+            return
+        offset = self._settings.offset
+        total = 0
+        for path in self._ordered_paths:
+            page = self._pages[path]
+            total += auto_segment_page(page, offset)
+        self._canvas.viewport().update()
+        self._canvas.segments_changed.emit()
+        self._status.showMessage(
+            f"Auto-detected {total} segment{'s' if total != 1 else ''} across {len(self._ordered_paths)} pages."
+        )
 
     def _on_save_all(self) -> None:
         output = self._settings.output_folder

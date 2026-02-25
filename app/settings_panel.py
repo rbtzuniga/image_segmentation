@@ -23,6 +23,8 @@ class SettingsPanel(QWidget):
 
     save_all_clicked = pyqtSignal()
     delete_segment_clicked = pyqtSignal()
+    auto_segment_page_clicked = pyqtSignal()
+    auto_segment_all_clicked = pyqtSignal()
     tool_changed = pyqtSignal(str)  # "select" | "segment"
     offset_changed = pyqtSignal(int)
     output_folder_changed = pyqtSignal(str)
@@ -94,6 +96,14 @@ class SettingsPanel(QWidget):
         # ── Action buttons ──────────────────────────────────────────────
         action_group = QGroupBox("Actions")
         action_layout = QVBoxLayout(action_group)
+
+        self._btn_auto_page = QPushButton("Auto Segment Page")
+        self._btn_auto_page.clicked.connect(self.auto_segment_page_clicked.emit)
+        action_layout.addWidget(self._btn_auto_page)
+
+        self._btn_auto_all = QPushButton("Auto Segment All Pages")
+        self._btn_auto_all.clicked.connect(self.auto_segment_all_clicked.emit)
+        action_layout.addWidget(self._btn_auto_all)
 
         self._btn_delete = QPushButton("Delete Selected Segment")
         self._btn_delete.clicked.connect(self.delete_segment_clicked.emit)
