@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QPushButton,
     QFileDialog,
+    QSlider,
 )
 
 
@@ -23,6 +24,8 @@ class SettingsPanel(QWidget):
 
     save_all_clicked = pyqtSignal()
     delete_segment_clicked = pyqtSignal()
+    delete_all_page_clicked = pyqtSignal()
+    delete_all_all_clicked = pyqtSignal()
     auto_segment_page_clicked = pyqtSignal()
     auto_segment_all_clicked = pyqtSignal()
     tool_changed = pyqtSignal(str)  # "select" | "segment"
@@ -93,33 +96,114 @@ class SettingsPanel(QWidget):
 
         layout.addWidget(out_group)
 
-        # ── Action buttons ──────────────────────────────────────────────
-        action_group = QGroupBox("Actions")
-        action_layout = QVBoxLayout(action_group)
+        # ── Auto-segment tuning ─────────────────────────────────────────
+        auto_group = QGroupBox("Auto-Segment Tuning")
+        auto_form = QFormLayout(auto_group)
+
+        # Merge sensitivity: how aggressively lines merge vertically
+        self._slider_merge = QSlider(Qt.Orientation.Horizontal)
+        self._slider_merge.setRange(10, 150)  # percentage of default
+        self._slider_merge.setValue(100)
+        self._slider_merge.setTickInterval(10)
+        self._slider_merge.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._lbl_merge = QLabel("100%")
+        self._slider_merge.valueChanged.connect(
+            lambda v: self._lbl_merge.setText(f"{v}%")
+        )
+        merge_row = QHBoxLayout()
+        merge_row.addWidget(self._slider_merge)
+        merge_row.addWidget(self._lbl_merge)
+        auto_form.addRow("Merge sens.:", merge_row)
+
+        # Horizontal reach: how far characters merge into words
+        self._slider_hreach = QSlider(Qt.Orientation.Horizontal)
+        self._slider_hreach.setRange(10, 150)
+        self._slider_hreach.setValue(100)
+        self._slider_hreach.setTickInterval(10)
+        self._slider_hreach.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._lbl_hreach = QLabel("100%")
+        self._slider_hreach.valueChanged.connect(
+            lambda v: self._lbl_hreach.setText(f"{v}%")
+        )
+        hreach_row = QHBoxLayout()
+        hreach_row.addWidget(self._slider_hreach)
+        hreach_row.addWidget(self._lbl_hreach)
+        auto_form.addRow("H. reach:", hreach_row)
+
+        # Minimum lines to keep a block
+        self._slider_minlines = QSlider(Qt.Orientation.Horizontal)
+        self._slider_minlines.setRange(1, 6)
+        self._slider_minlines.setValue(2)
+        self._slider_minlines.setTickInterval(1)
+        self._slider_minlines.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._lbl_minlines = QLabel("2")
+        self._slider_minlines.valueChanged.connect(
+            lambda v: self._lbl_minlines.setText(str(v))
+        )
+        minlines_row = QHBoxLayout()
+        minlines_row.addWidget(self._slider_minlines)
+        minlines_row.addWidget(self._lbl_minlines)
+        auto_form.addRow("Min lines:", minlines_row)
+
+        self._btn_reset_tuning = QPushButton("Reset to Defaults")
+        self._btn_reset_tuning.clicked.connect(self._reset_tuning)
+        auto_form.addRow(self._btn_reset_tuning)
+
+        layout.addWidget(auto_group)
+
+        # ── Auto-segment actions ───────────────────────────────────────
+        auto_action_group = QGroupBox()
+        auto_action_group.setFlat(True)
+        auto_action_layout = QVBoxLayout(auto_action_group)
+        auto_action_layout.setContentsMargins(0, 4, 0, 4)
 
         self._btn_auto_page = QPushButton("Auto Segment Page")
         self._btn_auto_page.clicked.connect(self.auto_segment_page_clicked.emit)
-        action_layout.addWidget(self._btn_auto_page)
+        auto_action_layout.addWidget(self._btn_auto_page)
 
         self._btn_auto_all = QPushButton("Auto Segment All Pages")
         self._btn_auto_all.clicked.connect(self.auto_segment_all_clicked.emit)
-        action_layout.addWidget(self._btn_auto_all)
+        auto_action_layout.addWidget(self._btn_auto_all)
+
+        layout.addWidget(auto_action_group)
+
+        # ── Delete actions ───────────────────────────────────────────
+        delete_group = QGroupBox()
+        delete_group.setFlat(True)
+        delete_layout = QVBoxLayout(delete_group)
+        delete_layout.setContentsMargins(0, 4, 0, 4)
 
         self._btn_delete = QPushButton("Delete Selected Segment")
         self._btn_delete.clicked.connect(self.delete_segment_clicked.emit)
-        action_layout.addWidget(self._btn_delete)
+        delete_layout.addWidget(self._btn_delete)
+
+        self._btn_delete_all = QPushButton("Delete All Segments (Page)")
+        self._btn_delete_all.clicked.connect(self.delete_all_page_clicked.emit)
+        delete_layout.addWidget(self._btn_delete_all)
+
+        self._btn_delete_all_all = QPushButton("Delete All Segments (All Pages)")
+        self._btn_delete_all_all.clicked.connect(self.delete_all_all_clicked.emit)
+        delete_layout.addWidget(self._btn_delete_all_all)
+
+        layout.addWidget(delete_group)
+
+        # ── Other actions ────────────────────────────────────────────
+        other_group = QGroupBox()
+        other_group.setFlat(True)
+        other_layout = QVBoxLayout(other_group)
+        other_layout.setContentsMargins(0, 4, 0, 4)
 
         self._btn_fit = QPushButton("Fit View")
-        action_layout.addWidget(self._btn_fit)
+        other_layout.addWidget(self._btn_fit)
 
         self._btn_save = QPushButton("Save All")
         self._btn_save.setStyleSheet(
             "QPushButton { background-color: #0078D4; color: white; padding: 8px; font-weight: bold; }"
         )
         self._btn_save.clicked.connect(self.save_all_clicked.emit)
-        action_layout.addWidget(self._btn_save)
+        other_layout.addWidget(self._btn_save)
 
-        layout.addWidget(action_group)
+        layout.addWidget(other_group)
         layout.addStretch(1)
 
         self.setMinimumWidth(200)
@@ -147,6 +231,21 @@ class SettingsPanel(QWidget):
     def fit_button(self) -> QPushButton:
         return self._btn_fit
 
+    @property
+    def merge_sensitivity(self) -> float:
+        """Vertical merge sensitivity as a multiplier (1.0 = default)."""
+        return self._slider_merge.value() / 100.0
+
+    @property
+    def horizontal_reach(self) -> float:
+        """Horizontal dilation multiplier (1.0 = default)."""
+        return self._slider_hreach.value() / 100.0
+
+    @property
+    def min_lines(self) -> int:
+        """Minimum text lines for a block to be kept."""
+        return self._slider_minlines.value()
+
     def set_segment_label(self, label: str | None) -> None:
         """Update the label editor with the currently selected segment's label."""
         if label is None:
@@ -167,6 +266,11 @@ class SettingsPanel(QWidget):
         self._btn_select.setChecked(tool == "select")
         self._btn_segment.setChecked(tool == "segment")
         self.tool_changed.emit(tool)
+
+    def _reset_tuning(self) -> None:
+        self._slider_merge.setValue(100)
+        self._slider_hreach.setValue(100)
+        self._slider_minlines.setValue(2)
 
     def _on_select_output(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")

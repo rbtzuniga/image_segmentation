@@ -136,8 +136,20 @@ def _vertical_gap(a: BBox, b: BBox) -> float:
 def detect_paragraphs(
     image_path: str,
     min_lines: int = 2,
+    merge_sensitivity: float = 1.0,
+    horizontal_reach: float = 1.0,
 ) -> List[BBox]:
-    """Detect paragraph-like text blocks in a scanned document image."""
+    """Detect paragraph-like text blocks in a scanned document image.
+
+    Parameters
+    ----------
+    min_lines : int
+        Minimum text lines for a block to be kept.
+    merge_sensitivity : float
+        Multiplier for vertical merge gap (>1 = merge more, <1 = split more).
+    horizontal_reach : float
+        Multiplier for horizontal dilation (>1 = merge wider, <1 = tighter).
+    """
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         return []
@@ -152,7 +164,7 @@ def detect_paragraphs(
 
     # 3. Light horizontal dilation to merge characters into words/short phrases
     #    Keep it small so it doesn't bridge columns.
-    h_kern_w = max(line_h, 8)
+    h_kern_w = max(int(line_h * horizontal_reach), 8)
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kern_w, 1))
     word_mask = cv2.dilate(binary, h_kernel, iterations=1)
 
@@ -190,7 +202,7 @@ def detect_paragraphs(
 
     # Allow merging if vertical gap ≤ threshold_gap (already computed
     # as the midpoint between within-entry and between-entry gaps)
-    max_v_gap = line_gap + max(line_gap // 3, 2)
+    max_v_gap = int((line_gap + max(line_gap // 3, 2)) * merge_sensitivity)
 
     # Sort by y for efficient pairwise comparison
     sorted_indices = sorted(range(n), key=lambda i: word_boxes[i][1])
@@ -262,12 +274,23 @@ def detect_paragraphs(
     return result_boxes
 
 
-def auto_segment_page(page: PageData, offset: int) -> int:
+def auto_segment_page(
+    page: PageData,
+    offset: int,
+    min_lines: int = 2,
+    merge_sensitivity: float = 1.0,
+    horizontal_reach: float = 1.0,
+) -> int:
     """Run auto-detection on a single page and add segments.
 
     Returns the number of new segments added.
     """
-    boxes = detect_paragraphs(page.file_path)
+    boxes = detect_paragraphs(
+        page.file_path,
+        min_lines=min_lines,
+        merge_sensitivity=merge_sensitivity,
+        horizontal_reach=horizontal_reach,
+    )
     added = 0
     for x, y, bw, bh in boxes:
         label = page.next_label(offset)

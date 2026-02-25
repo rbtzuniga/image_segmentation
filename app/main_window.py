@@ -76,6 +76,8 @@ class MainWindow(QMainWindow):
         self._settings.auto_segment_page_clicked.connect(self._on_auto_segment_page)
         self._settings.auto_segment_all_clicked.connect(self._on_auto_segment_all)
         self._settings.delete_segment_clicked.connect(self._canvas.delete_selected_segment)
+        self._settings.delete_all_page_clicked.connect(self._on_delete_all_page)
+        self._settings.delete_all_all_clicked.connect(self._on_delete_all_all)
         self._settings.fit_button.clicked.connect(self._canvas.fit_view)
 
         # Canvas → settings (label editing)
@@ -131,13 +133,21 @@ class MainWindow(QMainWindow):
                 page.segments[seg_idx].label = new_label
                 self._canvas.viewport().update()
 
+    def _auto_params(self) -> dict:
+        """Collect auto-segment tuning parameters from the settings panel."""
+        return dict(
+            min_lines=self._settings.min_lines,
+            merge_sensitivity=self._settings.merge_sensitivity,
+            horizontal_reach=self._settings.horizontal_reach,
+        )
+
     def _on_auto_segment_page(self) -> None:
         page = self._canvas.current_page_data()
         if not page:
             QMessageBox.warning(self, "No Page", "Please select a page first.")
             return
         offset = self._settings.offset
-        added = auto_segment_page(page, offset)
+        added = auto_segment_page(page, offset, **self._auto_params())
         self._canvas.viewport().update()
         self._canvas.segments_changed.emit()
         self._status.showMessage(
@@ -149,14 +159,39 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Pages", "Please load a folder first.")
             return
         offset = self._settings.offset
+        params = self._auto_params()
         total = 0
         for path in self._ordered_paths:
             page = self._pages[path]
-            total += auto_segment_page(page, offset)
+            total += auto_segment_page(page, offset, **params)
         self._canvas.viewport().update()
         self._canvas.segments_changed.emit()
         self._status.showMessage(
             f"Auto-detected {total} segment{'s' if total != 1 else ''} across {len(self._ordered_paths)} pages."
+        )
+
+    def _on_delete_all_page(self) -> None:
+        page = self._canvas.current_page_data()
+        if not page:
+            return
+        page.segments.clear()
+        self._canvas.select_segment(-1)
+        self._canvas.segments_changed.emit()
+        self._canvas.viewport().update()
+        self._status.showMessage(
+            f"Deleted all segments on page {self._current_page_idx + 1}."
+        )
+
+    def _on_delete_all_all(self) -> None:
+        total = 0
+        for page in self._pages.values():
+            total += len(page.segments)
+            page.segments.clear()
+        self._canvas.select_segment(-1)
+        self._canvas.segments_changed.emit()
+        self._canvas.viewport().update()
+        self._status.showMessage(
+            f"Deleted {total} segment{'s' if total != 1 else ''} across all pages."
         )
 
     def _on_save_all(self) -> None:
