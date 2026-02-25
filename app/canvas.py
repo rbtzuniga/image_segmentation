@@ -69,6 +69,7 @@ class CanvasView(QGraphicsView):
         self._pan_start: Optional[QPointF] = None
         self._offset: int = 0
         self._dragging_separator: int = -1  # index of separator being dragged (-1 = none)
+        self._dragging_sep_endpoint: str = ""  # "top" or "bottom"
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -117,15 +118,69 @@ class CanvasView(QGraphicsView):
             self.segment_selected.emit(-1)
             self.viewport().update()
 
-    def _separator_at(self, img_x: float) -> int:
-        """Return index of column separator near img_x, or -1."""
+    def split_selected_segment(self) -> None:
+        """Split the selected segment horizontally at its vertical midpoint."""
+        if not self._page_data or not (0 <= self._active_segment_idx < len(self._page_data.segments)):
+            return
+        seg = self._page_data.segments[self._active_segment_idx]
+        if len(seg.vertices) != 4:
+            return
+
+        # Vertices: TL(0), TR(1), BR(2), BL(3)
+        tl, tr, br, bl = seg.vertices
+
+        # Midpoints of left and right edges
+        ml = ((tl[0] + bl[0]) / 2.0, (tl[1] + bl[1]) / 2.0)
+        mr = ((tr[0] + br[0]) / 2.0, (tr[1] + br[1]) / 2.0)
+
+        # Top half: TL, TR, MR, ML
+        top_seg = Segment(
+            label=seg.label,
+            vertices=[tl, tr, mr, ml],
+        )
+        # Bottom half: ML, MR, BR, BL
+        bot_seg = Segment(
+            label=self._page_data.next_label(self._offset),
+            vertices=[ml, mr, br, bl],
+        )
+
+        # Replace original with top, insert bottom after
+        idx = self._active_segment_idx
+        self._page_data.segments[idx] = top_seg
+        self._page_data.segments.insert(idx + 1, bot_seg)
+
+        self._active_segment_idx = idx  # keep top selected
+        self.segments_changed.emit()
+        self.segment_selected.emit(idx)
+        self.viewport().update()
+
+    def _separator_at(self, img_x: float, img_y: float) -> tuple:
+        """Return (separator_index, endpoint) near (img_x, img_y), or (-1, '').
+
+        endpoint is 'top', 'bottom', or 'line' (grab anywhere along the line).
+        """
         if not self._page_data or not self._page_data.column_separators:
-            return -1
+            return -1, ""
+        if not self._pixmap_item:
+            return -1, ""
         tol = SEPARATOR_HIT_TOLERANCE / max(self._zoom, 0.01)
-        for i, sx in enumerate(self._page_data.column_separators):
-            if abs(img_x - sx) <= tol:
-                return i
-        return -1
+        img_h = self._pixmap_item.pixmap().height()
+        handle_radius = tol * 1.5  # slightly larger for endpoint handles
+
+        for i, (x_top, x_bot) in enumerate(self._page_data.column_separators):
+            # Check top endpoint
+            if (img_x - x_top) ** 2 + img_y ** 2 <= handle_radius ** 2:
+                return i, "top"
+            # Check bottom endpoint
+            if (img_x - x_bot) ** 2 + (img_y - img_h) ** 2 <= handle_radius ** 2:
+                return i, "bottom"
+            # Check along the line body
+            if img_h > 0:
+                t = img_y / img_h
+                line_x = x_top + (x_bot - x_top) * t
+                if abs(img_x - line_x) <= tol:
+                    return i, "line"  # move entire separator horizontally
+        return -1, ""
 
     # ── zoom ─────────────────────────────────────────────────────────────
 
@@ -165,9 +220,10 @@ class CanvasView(QGraphicsView):
 
         if self._tool == "select":
             # Check separator hit first
-            sep_idx = self._separator_at(img_x)
+            sep_idx, sep_ep = self._separator_at(img_x, img_y)
             if sep_idx >= 0:
                 self._dragging_separator = sep_idx
+                self._dragging_sep_endpoint = sep_ep
                 self.setCursor(Qt.CursorShape.SplitHCursor)
                 return
 
@@ -233,7 +289,27 @@ class CanvasView(QGraphicsView):
             # Clamp to image bounds
             if self._pixmap_item:
                 new_x = max(0.0, min(new_x, self._pixmap_item.pixmap().width()))
-            self._page_data.column_separators[self._dragging_separator] = new_x
+            sep = self._page_data.column_separators[self._dragging_separator]
+            if self._dragging_sep_endpoint == "bottom":
+                self._page_data.column_separators[self._dragging_separator] = (sep[0], new_x)
+            elif self._dragging_sep_endpoint == "top":
+                self._page_data.column_separators[self._dragging_separator] = (new_x, sep[1])
+            else:  # "line" — shift both endpoints by the same delta
+                mid_x = (sep[0] + sep[1]) / 2.0
+                if self._pixmap_item:
+                    img_h = self._pixmap_item.pixmap().height()
+                    t = max(0.0, min(pos.y() / img_h, 1.0)) if img_h > 0 else 0.5
+                else:
+                    t = 0.5
+                current_line_x = sep[0] + (sep[1] - sep[0]) * t
+                dx = new_x - current_line_x
+                new_top = sep[0] + dx
+                new_bot = sep[1] + dx
+                if self._pixmap_item:
+                    w = self._pixmap_item.pixmap().width()
+                    new_top = max(0.0, min(new_top, w))
+                    new_bot = max(0.0, min(new_bot, w))
+                self._page_data.column_separators[self._dragging_separator] = (new_top, new_bot)
             self.viewport().update()
             return
 
@@ -281,9 +357,12 @@ class CanvasView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton:
             if self._dragging_separator >= 0:
                 self._dragging_separator = -1
-                # Re-sort separators after drag
+                self._dragging_sep_endpoint = ""
+                # Re-sort separators by midpoint after drag
                 if self._page_data:
-                    self._page_data.column_separators.sort()
+                    self._page_data.column_separators.sort(
+                        key=lambda s: (s[0] + s[1]) / 2.0
+                    )
                     self.separators_changed.emit()
                 self.setCursor(
                     Qt.CursorShape.CrossCursor if self._tool == "segment" else Qt.CursorShape.ArrowCursor
@@ -320,18 +399,19 @@ class CanvasView(QGraphicsView):
         # Draw column separators
         if self._page_data.column_separators and self._pixmap_item:
             img_h = self._pixmap_item.pixmap().height()
-            for i, sep_x in enumerate(self._page_data.column_separators):
-                top = QPointF(self.mapFromScene(QPointF(sep_x, 0)))
-                bot = QPointF(self.mapFromScene(QPointF(sep_x, img_h)))
+            for i, (x_top, x_bot) in enumerate(self._page_data.column_separators):
+                top = QPointF(self.mapFromScene(QPointF(x_top, 0)))
+                bot = QPointF(self.mapFromScene(QPointF(x_bot, img_h)))
                 is_active = i == self._dragging_separator
                 pen = QPen(SEPARATOR_COLOR_ACTIVE if is_active else SEPARATOR_COLOR, 2)
                 pen.setCosmetic(True)
                 pen.setStyle(Qt.PenStyle.DashLine)
                 painter.setPen(pen)
                 painter.drawLine(top, bot)
-                # Small handle at top
+                # Handles at both endpoints
                 painter.setBrush(QBrush(SEPARATOR_COLOR_ACTIVE if is_active else SEPARATOR_COLOR))
                 painter.drawEllipse(top, 5, 5)
+                painter.drawEllipse(bot, 5, 5)
 
         for i, seg in enumerate(self._page_data.segments):
             if len(seg.vertices) != 4:

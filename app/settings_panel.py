@@ -24,6 +24,7 @@ class SettingsPanel(QWidget):
 
     save_all_clicked = pyqtSignal()
     delete_segment_clicked = pyqtSignal()
+    split_segment_clicked = pyqtSignal()
     delete_all_page_clicked = pyqtSignal()
     delete_all_all_clicked = pyqtSignal()
     auto_segment_page_clicked = pyqtSignal()
@@ -195,6 +196,14 @@ class SettingsPanel(QWidget):
         self._btn_delete = QPushButton("Delete Selected Segment")
         self._btn_delete.clicked.connect(self.delete_segment_clicked.emit)
         delete_layout.addWidget(self._btn_delete)
+
+        self._btn_split = QPushButton("Split Selected Segment")
+        self._btn_split.setToolTip(
+            "Split the selected segment horizontally in half,\n"
+            "creating a top and bottom segment."
+        )
+        self._btn_split.clicked.connect(self.split_segment_clicked.emit)
+        delete_layout.addWidget(self._btn_split)
 
         self._btn_delete_all = QPushButton("Delete All Segments (Page)")
         self._btn_delete_all.clicked.connect(self.delete_all_page_clicked.emit)

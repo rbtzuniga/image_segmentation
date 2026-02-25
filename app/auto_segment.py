@@ -207,11 +207,12 @@ def estimate_columns(image_path: str) -> int:
     return max(n_columns, 1)
 
 
-def estimate_column_separators(image_path: str, n_columns: int) -> List[float]:
+def estimate_column_separators(image_path: str, n_columns: int) -> List[Tuple[float, float]]:
     """Estimate the x-positions of column separators.
 
     Uses a vertical projection profile to find the deepest gutters
-    between content bands.  Returns a list of (n_columns - 1) x-positions.
+    between content bands.  Returns a list of (n_columns - 1) pairs
+    of (x_top, x_bottom) — initially vertical (same x for both endpoints).
     Falls back to evenly-spaced positions if detection fails.
     """
     if n_columns <= 1:
@@ -234,7 +235,8 @@ def estimate_column_separators(image_path: str, n_columns: int) -> List[float]:
     mean_val = np.mean(smoothed)
     if mean_val < 1:
         # Fallback: equal spacing
-        return [w * (i + 1) / n_columns for i in range(n_seps)]
+        return [(w * (i + 1) / n_columns, w * (i + 1) / n_columns)
+                for i in range(n_seps)]
 
     gutter_thresh = mean_val * 0.25
     margin = int(w * 0.05)
@@ -272,7 +274,8 @@ def estimate_column_separators(image_path: str, n_columns: int) -> List[float]:
         separators = [w * (i + 1) / n_columns for i in range(n_seps)]
 
     separators.sort()
-    return separators
+    # Return as (x_top, x_bottom) pairs — initially vertical
+    return [(x, x) for x in separators]
 
 
 def estimate_columns_sample(file_paths: List[str], max_sample: int = 5) -> int:
@@ -289,11 +292,28 @@ def estimate_columns_sample(file_paths: List[str], max_sample: int = 5) -> int:
     return Counter(counts).most_common(1)[0][0]
 
 
+def _sep_x_at_y(
+    sep: Tuple[float, float],
+    y: float,
+    img_height: int,
+) -> float:
+    """Interpolate separator x-position at a given y.
+
+    sep is (x_top, x_bottom).  y=0 → x_top, y=img_height → x_bottom.
+    """
+    x_top, x_bot = sep
+    if img_height <= 0:
+        return (x_top + x_bot) / 2.0
+    t = y / img_height
+    return x_top + (x_bot - x_top) * t
+
+
 def _column_sort_key(
     box: Tuple[float, ...],
     n_columns: int,
     img_width: int,
-    separators: List[float] | None = None,
+    separators: List[Tuple[float, float]] | None = None,
+    img_height: int = 0,
 ) -> Tuple[int, float]:
     """Return (column_index, centroid_y) for column-aware reading order.
 
@@ -304,21 +324,24 @@ def _column_sort_key(
     cy = box[1] + box[3] / 2.0
     if n_columns <= 1:
         return (0, cy)
-    col_idx = _column_for_x(cx, n_columns, img_width, separators)
+    col_idx = _column_for_x(cx, cy, n_columns, img_width, separators, img_height)
     return (col_idx, cy)
 
 
 def _column_for_x(
     x: float,
+    y: float,
     n_columns: int,
     img_width: int,
-    separators: List[float] | None = None,
+    separators: List[Tuple[float, float]] | None = None,
+    img_height: int = 0,
 ) -> int:
-    """Return the 0-based column index for an x-coordinate."""
+    """Return the 0-based column index for a point (x, y)."""
     if n_columns <= 1:
         return 0
     if separators and len(separators) == n_columns - 1:
-        for i, sx in enumerate(separators):
+        for i, sep in enumerate(separators):
+            sx = _sep_x_at_y(sep, y, img_height)
             if x < sx:
                 return i
         return n_columns - 1
@@ -329,12 +352,15 @@ def _column_for_x(
 
 def _boxes_cross_separator(
     box: BBox,
-    separators: List[float],
+    separators: List[Tuple[float, float]],
+    img_height: int = 0,
 ) -> bool:
     """Return True if the box spans across any separator line."""
-    bx, _, bw, _ = box
+    bx, by, bw, bh = box
     left, right = bx, bx + bw
-    for sx in separators:
+    cy = by + bh / 2.0
+    for sep in separators:
+        sx = _sep_x_at_y(sep, cy, img_height)
         if left < sx < right:
             return True
     return False
@@ -465,9 +491,11 @@ def detect_paragraphs(
             # Never merge boxes that sit in different columns (across a separator)
             if separators:
                 cx_a = box_a[0] + box_a[2] / 2.0
+                cy_a = box_a[1] + box_a[3] / 2.0
                 cx_b = box_b[0] + box_b[2] / 2.0
-                col_a = _column_for_x(cx_a, n_columns, w, separators)
-                col_b = _column_for_x(cx_b, n_columns, w, separators)
+                cy_b = box_b[1] + box_b[3] / 2.0
+                col_a = _column_for_x(cx_a, cy_a, n_columns, w, separators, h)
+                col_b = _column_for_x(cx_b, cy_b, n_columns, w, separators, h)
                 if col_a != col_b:
                     continue
 
@@ -520,7 +548,7 @@ def detect_paragraphs(
 
     # Sort in reading order: column by column (left-to-right),
     # then top-to-bottom within each column.
-    result_boxes.sort(key=lambda b: _column_sort_key(b, n_columns, w, separators))
+    result_boxes.sort(key=lambda b: _column_sort_key(b, n_columns, w, separators, h))
     return result_boxes
 
 
@@ -531,7 +559,7 @@ def auto_segment_page(
     merge_sensitivity: float = 1.0,
     horizontal_reach: float = 1.0,
     n_columns: int = 1,
-    separators: List[float] | None = None,
+    separators: List[Tuple[float, float]] | None = None,
 ) -> int:
     """Run auto-detection on a single page and add segments.
 
@@ -569,7 +597,7 @@ def auto_segment_page(
 
 def relabel_page(
     page: PageData, offset: int, n_columns: int = 1,
-    separators: List[float] | None = None,
+    separators: List[Tuple[float, float]] | None = None,
 ) -> None:
     """Re-label all segments on a page in column-aware reading order.
 
@@ -579,22 +607,22 @@ def relabel_page(
     if not page.segments:
         return
 
-    # Determine image width from the first segment (or read image header)
+    # Determine image dimensions from the image header
     try:
         img = cv2.imread(page.file_path, cv2.IMREAD_GRAYSCALE)
         if img is not None:
-            img_w = img.shape[1]
+            img_h, img_w = img.shape
         else:
-            img_w = 1
+            img_h, img_w = 1, 1
     except Exception:
-        img_w = 1
+        img_h, img_w = 1, 1
 
     def _seg_sort_key(seg: Segment) -> Tuple[int, float]:
         xs = [v[0] for v in seg.vertices]
         ys = [v[1] for v in seg.vertices]
         cx = sum(xs) / len(xs)
         cy = sum(ys) / len(ys)
-        col_idx = _column_for_x(cx, n_columns, img_w, separators)
+        col_idx = _column_for_x(cx, cy, n_columns, img_w, separators, img_h)
         return (col_idx, cy)
 
     page.segments.sort(key=_seg_sort_key)
