@@ -75,6 +75,14 @@ class SettingsPanel(QWidget):
         self._edit_label.setEnabled(False)
         form.addRow("Edit label:", self._edit_label)
 
+        self._btn_split = QPushButton("Split Selected Segment")
+        self._btn_split.setToolTip(
+            "Split the selected segment horizontally in half,\n"
+            "creating a top and bottom segment."
+        )
+        self._btn_split.clicked.connect(self.split_segment_clicked.emit)
+        form.addRow(self._btn_split)
+
         layout.addWidget(seg_group)
 
         # ── Output settings ─────────────────────────────────────────────
@@ -169,15 +177,22 @@ class SettingsPanel(QWidget):
         auto_action_layout = QVBoxLayout(auto_action_group)
         auto_action_layout.setContentsMargins(0, 4, 0, 4)
 
+        _auto_btn_style = (
+            "QPushButton { background-color: #CCE5FF; }"
+        )
+
         self._btn_auto_page = QPushButton("Auto Segment Page")
+        self._btn_auto_page.setStyleSheet(_auto_btn_style)
         self._btn_auto_page.clicked.connect(self.auto_segment_page_clicked.emit)
         auto_action_layout.addWidget(self._btn_auto_page)
 
         self._btn_auto_all = QPushButton("Auto Segment All Pages")
+        self._btn_auto_all.setStyleSheet(_auto_btn_style)
         self._btn_auto_all.clicked.connect(self.auto_segment_all_clicked.emit)
         auto_action_layout.addWidget(self._btn_auto_all)
 
         self._btn_relabel = QPushButton("Relabel Page")
+        self._btn_relabel.setStyleSheet(_auto_btn_style)
         self._btn_relabel.setToolTip(
             "Re-label all segments on the current page\n"
             "in column-aware reading order."
@@ -193,23 +208,22 @@ class SettingsPanel(QWidget):
         delete_layout = QVBoxLayout(delete_group)
         delete_layout.setContentsMargins(0, 4, 0, 4)
 
+        _del_btn_style = (
+            "QPushButton { background-color: #FFCCCC; }"
+        )
+
         self._btn_delete = QPushButton("Delete Selected Segment")
+        self._btn_delete.setStyleSheet(_del_btn_style)
         self._btn_delete.clicked.connect(self.delete_segment_clicked.emit)
         delete_layout.addWidget(self._btn_delete)
 
-        self._btn_split = QPushButton("Split Selected Segment")
-        self._btn_split.setToolTip(
-            "Split the selected segment horizontally in half,\n"
-            "creating a top and bottom segment."
-        )
-        self._btn_split.clicked.connect(self.split_segment_clicked.emit)
-        delete_layout.addWidget(self._btn_split)
-
         self._btn_delete_all = QPushButton("Delete All Segments (Page)")
+        self._btn_delete_all.setStyleSheet(_del_btn_style)
         self._btn_delete_all.clicked.connect(self.delete_all_page_clicked.emit)
         delete_layout.addWidget(self._btn_delete_all)
 
         self._btn_delete_all_all = QPushButton("Delete All Segments (All Pages)")
+        self._btn_delete_all_all.setStyleSheet(_del_btn_style)
         self._btn_delete_all_all.clicked.connect(self.delete_all_all_clicked.emit)
         delete_layout.addWidget(self._btn_delete_all_all)
 

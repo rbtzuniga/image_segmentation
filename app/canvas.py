@@ -70,6 +70,9 @@ class CanvasView(QGraphicsView):
         self._offset: int = 0
         self._dragging_separator: int = -1  # index of separator being dragged (-1 = none)
         self._dragging_sep_endpoint: str = ""  # "top" or "bottom"
+        self._dragging_edge: int = -1  # edge index being dragged (-1 = none)
+        self._drag_edge_seg_idx: int = -1
+        self._drag_edge_last: Optional[QPointF] = None  # last mouse pos during edge drag
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -182,6 +185,66 @@ class CanvasView(QGraphicsView):
                     return i, "line"  # move entire separator horizontally
         return -1, ""
 
+    @staticmethod
+    def _point_to_segment_dist(
+        px: float, py: float,
+        ax: float, ay: float,
+        bx: float, by: float,
+    ) -> float:
+        """Return the distance from point (px,py) to line segment (ax,ay)-(bx,by)."""
+        dx, dy = bx - ax, by - ay
+        len_sq = dx * dx + dy * dy
+        if len_sq < 1e-12:
+            return ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / len_sq))
+        proj_x = ax + t * dx
+        proj_y = ay + t * dy
+        return ((px - proj_x) ** 2 + (py - proj_y) ** 2) ** 0.5
+
+    def _edge_at(self, seg: Segment, img_x: float, img_y: float) -> int:
+        """Return edge index (0-3) near (img_x, img_y), or -1.
+
+        Edges: 0 = TL→TR (top), 1 = TR→BR (right), 2 = BR→BL (bottom), 3 = BL→TL (left).
+        Skips hits that are within the vertex grab radius.
+        """
+        if len(seg.vertices) != 4:
+            return -1
+        tol = VERTEX_RADIUS * 1.5 / max(self._zoom, 0.01)
+        # Skip if near a vertex
+        if seg.vertex_at(img_x, img_y, radius=tol) is not None:
+            return -1
+        edge_tol = VERTEX_RADIUS * 2.0 / max(self._zoom, 0.01)
+        best_edge = -1
+        best_dist = edge_tol
+        for e in range(4):
+            ax, ay = seg.vertices[e]
+            bx, by = seg.vertices[(e + 1) % 4]
+            d = self._point_to_segment_dist(img_x, img_y, ax, ay, bx, by)
+            if d < best_dist:
+                best_dist = d
+                best_edge = e
+        return best_edge
+
+    @staticmethod
+    def _edge_cursor(seg: Segment, edge_idx: int) -> Qt.CursorShape:
+        """Choose the resize cursor that best matches the edge direction."""
+        import math
+        ax, ay = seg.vertices[edge_idx]
+        bx, by = seg.vertices[(edge_idx + 1) % 4]
+        # Perpendicular angle to the edge
+        angle = math.degrees(math.atan2(by - ay, bx - ax)) % 180
+        # angle is the edge direction; perpendicular = angle + 90
+        perp = (angle + 90) % 180
+        # Map perpendicular angle to the closest cursor
+        if perp < 22.5 or perp >= 157.5:
+            return Qt.CursorShape.SizeHorCursor
+        elif 22.5 <= perp < 67.5:
+            return Qt.CursorShape.SizeFDiagCursor
+        elif 67.5 <= perp < 112.5:
+            return Qt.CursorShape.SizeVerCursor
+        else:
+            return Qt.CursorShape.SizeBDiagCursor
+
     # ── zoom ─────────────────────────────────────────────────────────────
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
@@ -234,6 +297,15 @@ class CanvasView(QGraphicsView):
                 if vi is not None:
                     self._dragging_vertex = vi
                     self._drag_segment_idx = self._active_segment_idx
+                    return
+
+                # Check edge hit on active segment
+                ei = self._edge_at(seg, img_x, img_y)
+                if ei >= 0:
+                    self._dragging_edge = ei
+                    self._drag_edge_seg_idx = self._active_segment_idx
+                    self._drag_edge_last = pos
+                    self.setCursor(self._edge_cursor(seg, ei))
                     return
 
             # Check all segments for vertex hit
@@ -345,6 +417,35 @@ class CanvasView(QGraphicsView):
             seg.vertices[self._dragging_vertex] = (img_x, img_y)
             self.viewport().update()
 
+        elif self._dragging_edge >= 0 and self._drag_edge_last is not None:
+            seg = self._page_data.segments[self._drag_edge_seg_idx]
+            dx = img_x - self._drag_edge_last.x()
+            dy = img_y - self._drag_edge_last.y()
+            e = self._dragging_edge
+            i1 = e
+            i2 = (e + 1) % 4
+            v1 = seg.vertices[i1]
+            v2 = seg.vertices[i2]
+            seg.vertices[i1] = (v1[0] + dx, v1[1] + dy)
+            seg.vertices[i2] = (v2[0] + dx, v2[1] + dy)
+            self._drag_edge_last = pos
+            self.viewport().update()
+
+        else:
+            # Hover: update cursor when over an edge of the active segment
+            if (self._tool == "select" and self._page_data
+                    and 0 <= self._active_segment_idx < len(self._page_data.segments)):
+                seg = self._page_data.segments[self._active_segment_idx]
+                # Vertex takes priority
+                if seg.vertex_at(img_x, img_y, radius=VERTEX_RADIUS / self._zoom * 2) is not None:
+                    self.setCursor(Qt.CursorShape.ArrowCursor)
+                else:
+                    ei = self._edge_at(seg, img_x, img_y)
+                    if ei >= 0:
+                        self.setCursor(self._edge_cursor(seg, ei))
+                    else:
+                        self.setCursor(Qt.CursorShape.ArrowCursor)
+
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.LeftButton):
             if self._panning:
@@ -376,6 +477,14 @@ class CanvasView(QGraphicsView):
             if self._dragging_vertex is not None:
                 self._dragging_vertex = None
                 self._drag_segment_idx = -1
+                self.segments_changed.emit()
+            if self._dragging_edge >= 0:
+                self._dragging_edge = -1
+                self._drag_edge_seg_idx = -1
+                self._drag_edge_last = None
+                self.setCursor(
+                    Qt.CursorShape.CrossCursor if self._tool == "segment" else Qt.CursorShape.ArrowCursor
+                )
                 self.segments_changed.emit()
 
     # ── keyboard handling ────────────────────────────────────────────────
