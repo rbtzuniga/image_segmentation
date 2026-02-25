@@ -82,14 +82,27 @@ def _estimate_line_height(binary: np.ndarray) -> Tuple[int, int]:
     med_line = max(int(np.median(line_heights)), 5)
 
     if gap_heights:
-        # The inter-line gap within a paragraph is the smaller gaps.
-        # Paragraph-separating gaps are the bigger ones.
-        # Use the 25th percentile as "within-paragraph" gap estimate.
-        med_gap = max(int(np.percentile(gap_heights, 25)), 2)
+        # Sort gaps to find the natural break between
+        # "within-paragraph" spacing and "between-paragraph" spacing.
+        sorted_gaps = sorted(gap_heights)
+        # Use median as the baseline within-paragraph gap
+        med_gap = max(int(np.median(sorted_gaps)), 2)
+
+        # Look for a natural jump in gap sizes to find the paragraph break point.
+        # If there's a gap that's ≥ 1.8× the median, that's a paragraph separator.
+        # Set threshold just below that jump.
+        big_gaps = [g for g in sorted_gaps if g > med_gap * 1.8]
+        if big_gaps:
+            # Threshold = midpoint between median gap and smallest "big" gap
+            para_gap = min(big_gaps)
+            threshold_gap = (med_gap + para_gap) // 2
+        else:
+            threshold_gap = med_gap
     else:
         med_gap = med_line // 3
+        threshold_gap = med_gap
 
-    return med_line, med_gap
+    return med_line, threshold_gap
 
 
 def _horizontal_overlap(a: BBox, b: BBox) -> float:
@@ -175,9 +188,9 @@ def detect_paragraphs(
     n = len(word_boxes)
     uf = _UF(n)
 
-    # Allow merging if vertical gap ≤ line_gap + small margin
-    # This bridges normal line spacing but NOT paragraph/entry gaps
-    max_v_gap = line_gap + max(line_gap // 2, 2)
+    # Allow merging if vertical gap ≤ threshold_gap (already computed
+    # as the midpoint between within-entry and between-entry gaps)
+    max_v_gap = line_gap + max(line_gap // 3, 2)
 
     # Sort by y for efficient pairwise comparison
     sorted_indices = sorted(range(n), key=lambda i: word_boxes[i][1])
