@@ -4,20 +4,24 @@ A Python GUI application for segmenting scanned document images into labeled reg
 
 ## Demo
 Here's a quick demo of the tool in action: 
-[Demo](https://www.dropbox.com/scl/fi/b1ss1fh12wutqwujjpmpn/img_seg_demo.mp4?rlkey=oyyyp8puvguri440uq3c5aqp0&st=zqtcoqdx&dl=0)
+[Demo](https://www.dropbox.com/scl/fi/92zzuju8zt55cw2e8xuoj/img_seg_usage.mp4?rlkey=ua4o2ci2z8m5hz4tk5p77b8ms&st=r6y7j4lm&dl=0)
 
 ## Features
 
 - Load all images from a folder (PNG, JPG, TIFF, BMP)
 - Thumbnail side panel for quick page navigation (natural sort order)
+- **Save/Load sessions** – save your work to a `.seg` file and resume later
 - Draw rectangular segments on each page, then adjust vertices to form arbitrary quadrilaterals
 - **Auto-segment** – automatic paragraph/block detection with tunable parameters
 - **Column-aware labeling** – segments are labeled in reading order (column by column, top to bottom)
 - **Column separators** – visual draggable separator lines between columns; supports tilted separators for skewed scans
+- **Content bounds** – red draggable lines delimiting the content area; used to filter auto-detected segments
+- **Add segment grid** – quickly create a uniform grid of segments (N rows × M columns)
 - **Relabel Page** – reassign labels to existing segments in reading order
 - **Multi-select** – Ctrl+click to select multiple segments, even across pages
 - **Combine segments** – pair two selected segments into a top/bottom unit that exports as one vertically-concatenated image
 - **Split segment** – split a selected segment horizontally into top/bottom halves
+- **Segment dragging** – click and drag a segment to move it entirely
 - **Edge dragging** – drag any edge of a selected segment to resize it with parallel movement
 - Configurable label offset – new segments get labels `offset + i`
 - Manually edit segment labels at any time
@@ -29,6 +33,7 @@ Here's a quick demo of the tool in action:
 - Press **R** to relabel the current page
 - Middle-click or left-click on empty space to pan the canvas
 - Export all segments as cropped images with configurable format (PNG / JPG / TIFF) and filename prefix
+- **Robust image processing** – handles gray backgrounds and edge shadows automatically
 
 ## Installation
 
@@ -142,6 +147,50 @@ When a folder is loaded, column separators are auto-estimated from the vertical 
 - **Drag an endpoint handle** (top or bottom) to tilt the separator for skewed scans.
 - Separators prevent auto-segment from merging blocks across columns.
 
+### Content bounds
+
+Red vertical lines mark the left and right boundaries of the content area. These are auto-estimated on folder load and can be adjusted:
+
+- **Drag the line body** to shift a boundary horizontally.
+- **Drag an endpoint handle** (top or bottom) to tilt the boundary for skewed pages.
+- Content bounds are used by auto-segment to filter out detections that fall mostly outside the content area.
+
+### Add segment grid
+
+Quickly create a uniform grid of segments:
+
+1. Set the **number of rows** in the spinbox (default: 10).
+2. Click **Add Segment Grid**.
+3. All existing segments on the page are deleted.
+4. A grid is created with the specified number of rows per column. Column widths are determined by the column separators and content bounds.
+
+This is useful for documents with regular layouts where automatic detection isn't needed.
+
+### Segment dragging
+
+In **Select** mode, click on a segment body (not a vertex or edge) to select and start dragging:
+
+- Move the mouse while holding the click to move the entire segment.
+- The cursor changes to a 4-way arrow during dragging.
+- Release to finish moving.
+
+### Save and load sessions
+
+Save your work to resume later:
+
+- **Save Segmentation** – saves a `.seg` file containing:
+  - All loaded image file paths (specific files, not just the folder)
+  - All segments with their vertices, labels, and combined status
+  - Column separators and content bounds positions
+  - Column count setting
+  
+- **Load Segmentation** – opens a `.seg` file and restores the session:
+  - Validates which image files still exist (warns about missing files)
+  - Restores all segments including combined pairs
+  - Restores column layout settings
+
+The `.seg` file format is JSON-based for easy inspection and backup.
+
 ### Edge & vertex dragging
 
 In **Select** mode with a segment selected:
@@ -151,7 +200,9 @@ In **Select** mode with a segment selected:
 
 ### UI color coding
 
-- **Light blue** buttons – auto-segment actions (Auto Segment Page, Auto Segment All Pages, Relabel Page)
+- **Light blue** buttons – auto-segment actions (Auto Segment Page, Auto Segment All Pages, Relabel Page, Add Segment Grid)
+- **Green** lines – column separators
+- **Red** lines – content bounds
 - **Purple** segments – combined segment pairs
 - **Light red** buttons – destructive actions (Delete Selected, Delete All Page, Delete All Pages)
 
@@ -168,6 +219,7 @@ In **Select** mode with a segment selected:
 | Relabel current page | R |
 | Pan canvas | Middle-click drag, or left-click drag on empty space (Select mode) |
 | Zoom | Scroll wheel |
+| Move segment | Click and drag segment body |
 
 ## Output naming
 
