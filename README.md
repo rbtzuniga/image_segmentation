@@ -183,11 +183,14 @@ Save your work to resume later:
   - All segments with their vertices, labels, and combined status
   - Column separators and content bounds positions
   - Column count setting
+  - Output folder, prefix, and image format settings
   
 - **Load Segmentation** – opens a `.seg` file and restores the session:
-  - Validates which image files still exist (warns about missing files)
+  - If image files are not found at their original location, prompts you to select a new input folder (files are matched by filename)
+  - If the output folder no longer exists, prompts you to select a new one
   - Restores all segments including combined pairs
   - Restores column layout settings
+  - Restores output settings (folder, prefix, format)
 
 The `.seg` file format is JSON-based for easy inspection and backup.
 

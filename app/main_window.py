@@ -212,6 +212,9 @@ class MainWindow(QMainWindow):
         data = {
             "version": 1,
             "n_columns": self._settings.n_columns,
+            "output_folder": self._settings.output_folder,
+            "prefix": self._settings.prefix,
+            "image_format": self._settings.image_format,
             "pages": []
         }
 
@@ -284,28 +287,86 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Empty File", "No pages found in the file.")
             return
 
+        from pathlib import Path
+
         # Collect file paths and check which exist
         file_paths = []
         missing = []
+        path_mapping = {}  # old_path -> new_path
+
         for pd in pages_data:
             fp = pd.get("file_path", "")
             if fp:
-                from pathlib import Path
                 if Path(fp).is_file():
                     file_paths.append(fp)
+                    path_mapping[fp] = fp
                 else:
                     missing.append(fp)
 
+        # If some files are missing, ask user to locate the input folder
         if missing:
-            QMessageBox.warning(
+            reply = QMessageBox.question(
                 self, "Missing Files",
-                f"{len(missing)} image(s) not found:\n" + "\n".join(missing[:5]) +
-                ("\n..." if len(missing) > 5 else "")
+                f"{len(missing)} image(s) not found at their original location.\n\n"
+                f"Would you like to select a new input folder to locate them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
+            if reply == QMessageBox.StandardButton.Yes:
+                new_folder = QFileDialog.getExistingDirectory(
+                    self, "Select Input Folder with Images"
+                )
+                if new_folder:
+                    new_folder_path = Path(new_folder)
+                    still_missing = []
+                    for old_path in missing:
+                        # Try to find by filename
+                        filename = Path(old_path).name
+                        new_path = new_folder_path / filename
+                        if new_path.is_file():
+                            new_path_str = str(new_path)
+                            file_paths.append(new_path_str)
+                            path_mapping[old_path] = new_path_str
+                        else:
+                            still_missing.append(old_path)
+                    if still_missing:
+                        QMessageBox.warning(
+                            self, "Still Missing",
+                            f"{len(still_missing)} image(s) could not be found:\n" +
+                            "\n".join(Path(p).name for p in still_missing[:5]) +
+                            ("\n..." if len(still_missing) > 5 else "")
+                        )
+            else:
+                # User declined, show what's missing
+                QMessageBox.warning(
+                    self, "Missing Files",
+                    f"{len(missing)} image(s) will be skipped:\n" +
+                    "\n".join(Path(p).name for p in missing[:5]) +
+                    ("\n..." if len(missing) > 5 else "")
+                )
 
         if not file_paths:
             QMessageBox.critical(self, "No Valid Files", "No valid image files found.")
             return
+
+        # Check output folder
+        output_folder = data.get("output_folder", "")
+        if output_folder and not Path(output_folder).is_dir():
+            reply = QMessageBox.question(
+                self, "Output Folder Not Found",
+                f"The saved output folder no longer exists:\n{output_folder}\n\n"
+                f"Would you like to select a new output folder?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                new_output = QFileDialog.getExistingDirectory(
+                    self, "Select Output Folder"
+                )
+                if new_output:
+                    output_folder = new_output
+                else:
+                    output_folder = ""
+            else:
+                output_folder = ""
 
         # Load thumbnails
         self._thumb_panel.load_files(file_paths)
@@ -315,8 +376,10 @@ class MainWindow(QMainWindow):
         self._pages.clear()
 
         for pd in pages_data:
-            fp = pd.get("file_path", "")
-            if fp not in file_paths:
+            old_fp = pd.get("file_path", "")
+            # Use mapped path (could be relocated)
+            fp = path_mapping.get(old_fp)
+            if not fp or fp not in file_paths:
                 continue
 
             page = PageData(file_path=fp)
@@ -351,6 +414,16 @@ class MainWindow(QMainWindow):
         # Restore column count setting
         n_cols = data.get("n_columns", 1)
         self._settings.n_columns = n_cols
+
+        # Restore output settings
+        if output_folder:
+            self._settings.output_folder = output_folder
+        prefix = data.get("prefix", "")
+        if prefix:
+            self._settings.prefix = prefix
+        img_format = data.get("image_format", "")
+        if img_format:
+            self._settings.image_format = img_format
 
         # Select first page
         if file_paths:

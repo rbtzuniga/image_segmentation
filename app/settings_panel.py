@@ -293,13 +293,28 @@ class SettingsPanel(QWidget):
     def output_folder(self) -> str:
         return self._output_folder
 
+    @output_folder.setter
+    def output_folder(self, value: str) -> None:
+        self._output_folder = value
+        self._lbl_output.setText(value if value else "Not set")
+
     @property
     def prefix(self) -> str:
         return self._edit_prefix.text().strip() or "segment"
 
+    @prefix.setter
+    def prefix(self, value: str) -> None:
+        self._edit_prefix.setText(value)
+
     @property
     def image_format(self) -> str:
         return self._combo_format.currentText()
+
+    @image_format.setter
+    def image_format(self, value: str) -> None:
+        idx = self._combo_format.findText(value)
+        if idx >= 0:
+            self._combo_format.setCurrentIndex(idx)
 
     @property
     def offset(self) -> int:
