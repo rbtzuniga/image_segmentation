@@ -18,6 +18,7 @@ from app.auto_segment import (
     auto_segment_page,
     estimate_columns_sample,
     estimate_column_separators,
+    estimate_content_bounds,
     relabel_page,
 )
 from app.canvas import CanvasView
@@ -201,10 +202,15 @@ class MainWindow(QMainWindow):
         return []
 
     def _estimate_all_separators(self, n_columns: int) -> None:
-        """Estimate separator positions for all loaded pages."""
+        """Estimate separator positions and content bounds for all loaded pages."""
         for path in self._ordered_paths:
             page = self._pages[path]
-            page.column_separators = estimate_column_separators(path, n_columns)
+            # Estimate content bounds first
+            page.content_bounds = estimate_content_bounds(path)
+            # Then estimate separators using content bounds for better placement
+            page.column_separators = estimate_column_separators(
+                path, n_columns, content_bounds=page.content_bounds
+            )
 
     def _on_columns_changed(self, n_columns: int) -> None:
         """Re-estimate separators for all pages when the column spinner changes."""
@@ -220,6 +226,7 @@ class MainWindow(QMainWindow):
         added = auto_segment_page(
             page, offset, **self._auto_params(),
             separators=page.column_separators or None,
+            content_bounds=page.content_bounds or None,
         )
         self._canvas.clear_multi_selection()
         self._canvas.viewport().update()
@@ -240,6 +247,7 @@ class MainWindow(QMainWindow):
             total += auto_segment_page(
                 page, offset, **params,
                 separators=page.column_separators or None,
+                content_bounds=page.content_bounds or None,
             )
         self._canvas.clear_multi_selection()
         self._canvas.viewport().update()

@@ -35,6 +35,10 @@ SEPARATOR_COLOR = QColor(0, 180, 60, 160)
 SEPARATOR_COLOR_ACTIVE = QColor(0, 220, 80, 220)
 SEPARATOR_HIT_TOLERANCE = 8  # pixels (screen) for grabbing a separator
 
+# Content bounds colors (red)
+CONTENT_BOUND_COLOR = QColor(220, 60, 60, 160)
+CONTENT_BOUND_COLOR_ACTIVE = QColor(255, 80, 80, 220)
+
 # Colors for combined segments
 EDGE_COLOR_COMBINED = QColor(160, 0, 200)
 EDGE_COLOR_COMBINED_SELECTED = QColor(200, 80, 255)
@@ -50,6 +54,7 @@ class CanvasView(QGraphicsView):
     segment_selected = pyqtSignal(int)  # index of selected segment (-1 = none)
     tool_switched = pyqtSignal(str)  # Emitted when tool changes via canvas interaction (e.g. right-click)
     separators_changed = pyqtSignal()  # Emitted when column separators are moved
+    content_bounds_changed = pyqtSignal()  # Emitted when content bounds are moved
     relabel_requested = pyqtSignal()  # Emitted when user presses R
     multi_delete_requested = pyqtSignal(dict)  # {file_path: {seg_indices}} for cross-page deletion
     combine_requested = pyqtSignal(dict)  # {file_path: {seg_indices}} for combining 2 segments
@@ -81,6 +86,8 @@ class CanvasView(QGraphicsView):
         self._offset: int = 0
         self._dragging_separator: int = -1  # index of separator being dragged (-1 = none)
         self._dragging_sep_endpoint: str = ""  # "top" or "bottom"
+        self._dragging_content_bound: str = ""  # "left" or "right" or ""
+        self._dragging_content_endpoint: str = ""  # "top", "bottom", or "line"
         self._dragging_edge: int = -1  # edge index being dragged (-1 = none)
         self._drag_edge_seg_idx: int = -1
         self._drag_edge_last: Optional[QPointF] = None  # last mouse pos during edge drag
@@ -211,6 +218,48 @@ class CanvasView(QGraphicsView):
                 if abs(img_x - line_x) <= tol:
                     return i, "line"  # move entire separator horizontally
         return -1, ""
+
+    def _content_bound_at(self, img_x: float, img_y: float) -> tuple:
+        """Return (bound_side, endpoint) near (img_x, img_y), or ('', '').
+
+        bound_side is 'left' or 'right'.
+        endpoint is 'top', 'bottom', or 'line' (grab anywhere along the line).
+        """
+        if not self._page_data or not self._page_data.content_bounds:
+            return "", ""
+        if not self._pixmap_item:
+            return "", ""
+        tol = SEPARATOR_HIT_TOLERANCE / max(self._zoom, 0.01)
+        img_h = self._pixmap_item.pixmap().height()
+        handle_radius = tol * 1.5
+
+        left_bound, right_bound = self._page_data.content_bounds
+
+        # Check left bound
+        left_top, left_bot = left_bound
+        if (img_x - left_top) ** 2 + img_y ** 2 <= handle_radius ** 2:
+            return "left", "top"
+        if (img_x - left_bot) ** 2 + (img_y - img_h) ** 2 <= handle_radius ** 2:
+            return "left", "bottom"
+        if img_h > 0:
+            t = img_y / img_h
+            line_x = left_top + (left_bot - left_top) * t
+            if abs(img_x - line_x) <= tol:
+                return "left", "line"
+
+        # Check right bound
+        right_top, right_bot = right_bound
+        if (img_x - right_top) ** 2 + img_y ** 2 <= handle_radius ** 2:
+            return "right", "top"
+        if (img_x - right_bot) ** 2 + (img_y - img_h) ** 2 <= handle_radius ** 2:
+            return "right", "bottom"
+        if img_h > 0:
+            t = img_y / img_h
+            line_x = right_top + (right_bot - right_top) * t
+            if abs(img_x - line_x) <= tol:
+                return "right", "line"
+
+        return "", ""
 
     @staticmethod
     def _point_to_segment_dist(
@@ -351,6 +400,14 @@ class CanvasView(QGraphicsView):
                 self.setCursor(Qt.CursorShape.SplitHCursor)
                 return
 
+            # Check content bound hit
+            cb_side, cb_ep = self._content_bound_at(img_x, img_y)
+            if cb_side:
+                self._dragging_content_bound = cb_side
+                self._dragging_content_endpoint = cb_ep
+                self.setCursor(Qt.CursorShape.SplitHCursor)
+                return
+
             # Check vertex hit first (on active segment)
             if self._active_segment_idx >= 0:
                 seg = self._page_data.segments[self._active_segment_idx]
@@ -451,6 +508,58 @@ class CanvasView(QGraphicsView):
             self.viewport().update()
             return
 
+        if self._dragging_content_bound and self._page_data and self._page_data.content_bounds:
+            pos = self.mapToScene(event.pos())
+            new_x = pos.x()
+            # Clamp to image bounds
+            if self._pixmap_item:
+                new_x = max(0.0, min(new_x, self._pixmap_item.pixmap().width()))
+            left_bound, right_bound = self._page_data.content_bounds
+            if self._dragging_content_bound == "left":
+                left_top, left_bot = left_bound
+                if self._dragging_content_endpoint == "bottom":
+                    self._page_data.content_bounds = ((left_top, new_x), right_bound)
+                elif self._dragging_content_endpoint == "top":
+                    self._page_data.content_bounds = ((new_x, left_bot), right_bound)
+                else:  # "line"
+                    if self._pixmap_item:
+                        img_h = self._pixmap_item.pixmap().height()
+                        t = max(0.0, min(pos.y() / img_h, 1.0)) if img_h > 0 else 0.5
+                    else:
+                        t = 0.5
+                    current_line_x = left_top + (left_bot - left_top) * t
+                    dx = new_x - current_line_x
+                    new_top = left_top + dx
+                    new_bot = left_bot + dx
+                    if self._pixmap_item:
+                        w = self._pixmap_item.pixmap().width()
+                        new_top = max(0.0, min(new_top, w))
+                        new_bot = max(0.0, min(new_bot, w))
+                    self._page_data.content_bounds = ((new_top, new_bot), right_bound)
+            else:  # "right"
+                right_top, right_bot = right_bound
+                if self._dragging_content_endpoint == "bottom":
+                    self._page_data.content_bounds = (left_bound, (right_top, new_x))
+                elif self._dragging_content_endpoint == "top":
+                    self._page_data.content_bounds = (left_bound, (new_x, right_bot))
+                else:  # "line"
+                    if self._pixmap_item:
+                        img_h = self._pixmap_item.pixmap().height()
+                        t = max(0.0, min(pos.y() / img_h, 1.0)) if img_h > 0 else 0.5
+                    else:
+                        t = 0.5
+                    current_line_x = right_top + (right_bot - right_top) * t
+                    dx = new_x - current_line_x
+                    new_top = right_top + dx
+                    new_bot = right_bot + dx
+                    if self._pixmap_item:
+                        w = self._pixmap_item.pixmap().width()
+                        new_top = max(0.0, min(new_top, w))
+                        new_bot = max(0.0, min(new_bot, w))
+                    self._page_data.content_bounds = (left_bound, (new_top, new_bot))
+            self.viewport().update()
+            return
+
         if self._panning and self._pan_start is not None:
             delta = event.pos() - self._pan_start
             self._pan_start = event.pos()
@@ -531,6 +640,15 @@ class CanvasView(QGraphicsView):
                         key=lambda s: (s[0] + s[1]) / 2.0
                     )
                     self.separators_changed.emit()
+                self.setCursor(
+                    Qt.CursorShape.CrossCursor if self._tool == "segment" else Qt.CursorShape.ArrowCursor
+                )
+                self.viewport().update()
+                return
+            if self._dragging_content_bound:
+                self._dragging_content_bound = ""
+                self._dragging_content_endpoint = ""
+                self.content_bounds_changed.emit()
                 self.setCursor(
                     Qt.CursorShape.CrossCursor if self._tool == "segment" else Qt.CursorShape.ArrowCursor
                 )
@@ -617,6 +735,39 @@ class CanvasView(QGraphicsView):
                 painter.setBrush(QBrush(SEPARATOR_COLOR_ACTIVE if is_active else SEPARATOR_COLOR))
                 painter.drawEllipse(top, 5, 5)
                 painter.drawEllipse(bot, 5, 5)
+
+        # Draw content bounds (red lines)
+        if self._page_data.content_bounds and self._pixmap_item:
+            img_h = self._pixmap_item.pixmap().height()
+            left_bound, right_bound = self._page_data.content_bounds
+
+            # Draw left content bound
+            left_top, left_bot = left_bound
+            top = QPointF(self.mapFromScene(QPointF(left_top, 0)))
+            bot = QPointF(self.mapFromScene(QPointF(left_bot, img_h)))
+            is_active = self._dragging_content_bound == "left"
+            pen = QPen(CONTENT_BOUND_COLOR_ACTIVE if is_active else CONTENT_BOUND_COLOR, 2)
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawLine(top, bot)
+            painter.setBrush(QBrush(CONTENT_BOUND_COLOR_ACTIVE if is_active else CONTENT_BOUND_COLOR))
+            painter.drawEllipse(top, 5, 5)
+            painter.drawEllipse(bot, 5, 5)
+
+            # Draw right content bound
+            right_top, right_bot = right_bound
+            top = QPointF(self.mapFromScene(QPointF(right_top, 0)))
+            bot = QPointF(self.mapFromScene(QPointF(right_bot, img_h)))
+            is_active = self._dragging_content_bound == "right"
+            pen = QPen(CONTENT_BOUND_COLOR_ACTIVE if is_active else CONTENT_BOUND_COLOR, 2)
+            pen.setCosmetic(True)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawLine(top, bot)
+            painter.setBrush(QBrush(CONTENT_BOUND_COLOR_ACTIVE if is_active else CONTENT_BOUND_COLOR))
+            painter.drawEllipse(top, 5, 5)
+            painter.drawEllipse(bot, 5, 5)
 
         page_selected = self._multi_selected.get(self._page_data.file_path, set()) if self._page_data else set()
         for i, seg in enumerate(self._page_data.segments):

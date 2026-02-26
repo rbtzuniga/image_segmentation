@@ -207,13 +207,18 @@ def estimate_columns(image_path: str) -> int:
     return max(n_columns, 1)
 
 
-def estimate_column_separators(image_path: str, n_columns: int) -> List[Tuple[float, float]]:
+def estimate_column_separators(
+    image_path: str,
+    n_columns: int,
+    content_bounds: Tuple[Tuple[float, float], Tuple[float, float]] | None = None,
+) -> List[Tuple[float, float]]:
     """Estimate the x-positions of column separators.
 
     Uses a vertical projection profile to find the deepest gutters
     between content bands.  Returns a list of (n_columns - 1) pairs
     of (x_top, x_bottom) — initially vertical (same x for both endpoints).
-    Falls back to evenly-spaced positions if detection fails.
+    Falls back to evenly-spaced positions within content bounds if detection
+    has low confidence.
     """
     if n_columns <= 1:
         return []
@@ -231,51 +236,92 @@ def estimate_column_separators(image_path: str, n_columns: int) -> List[Tuple[fl
 
     n_seps = n_columns - 1
 
+    # Determine content area bounds
+    if content_bounds:
+        left_bound, right_bound = content_bounds
+        # Use average of top/bottom for vertical lines
+        left_x = (left_bound[0] + left_bound[1]) / 2.0
+        right_x = (right_bound[0] + right_bound[1]) / 2.0
+    else:
+        # Fallback: use 5% margins
+        left_x = w * 0.05
+        right_x = w * 0.95
+
+    content_width = right_x - left_x
+
+    def _equidistant_separators() -> List[Tuple[float, float]]:
+        """Return separators equally spaced within content bounds."""
+        return [
+            (left_x + content_width * (i + 1) / n_columns,
+             left_x + content_width * (i + 1) / n_columns)
+            for i in range(n_seps)
+        ]
+
     # Find gutter regions (low ink density)
     mean_val = np.mean(smoothed)
     if mean_val < 1:
-        # Fallback: equal spacing
-        return [(w * (i + 1) / n_columns, w * (i + 1) / n_columns)
-                for i in range(n_seps)]
+        return _equidistant_separators()
 
     gutter_thresh = mean_val * 0.25
-    margin = int(w * 0.05)
+    margin = int(left_x)  # Use content bound as margin
+    right_margin = int(w - right_x)
 
     # Build a "gutter score" — lower ink = deeper gutter
-    # We look for the n_seps deepest gutter valleys in the interior
-    # Widen the search window so we pick the centre of each gutter
     gutter_window = max(w // 40, 10)
-    # Create a running-minimum-ink array (averaged over a window)
     gutter_score = np.convolve(
         smoothed, np.ones(gutter_window) / gutter_window, mode="same"
     )
 
-    # Mask out margins
-    gutter_score[:margin] = np.inf
-    gutter_score[-margin:] = np.inf
+    # Mask out areas outside content bounds
+    gutter_score[:max(margin, 1)] = np.inf
+    gutter_score[-max(right_margin, 1):] = np.inf
 
-    # Find the n_seps best (lowest-score) gutter positions,
-    # ensuring they are well-separated from each other.
+    # Find the n_seps best (lowest-score) gutter positions
     separators: List[float] = []
-    min_sep_distance = w // (n_columns * 2)  # at least half a column width apart
+    min_sep_distance = int(content_width // (n_columns * 2))
 
     for _ in range(n_seps):
         idx = int(np.argmin(gutter_score))
         if gutter_score[idx] == np.inf:
             break
         separators.append(float(idx))
-        # Suppress nearby positions
         lo = max(0, idx - min_sep_distance)
         hi = min(len(gutter_score), idx + min_sep_distance)
         gutter_score[lo:hi] = np.inf
 
-    # If we didn't find enough, fill with equal spacing
-    if len(separators) < n_seps:
-        separators = [w * (i + 1) / n_columns for i in range(n_seps)]
+    # Confidence check: verify separators are reasonable
+    if len(separators) == n_seps:
+        separators.sort()
+        expected_spacing = content_width / n_columns
+        low_confidence = False
 
-    separators.sort()
-    # Return as (x_top, x_bottom) pairs — initially vertical
-    return [(x, x) for x in separators]
+        for i, sep_x in enumerate(separators):
+            # Check if separator is within content bounds
+            if sep_x < left_x or sep_x > right_x:
+                low_confidence = True
+                break
+            # Check if separator is roughly where expected (within 40% tolerance)
+            expected_pos = left_x + expected_spacing * (i + 1)
+            if abs(sep_x - expected_pos) > expected_spacing * 0.4:
+                low_confidence = True
+                break
+
+        # Check spacing between separators is roughly equal
+        if not low_confidence and n_seps > 1:
+            gaps = [separators[i+1] - separators[i] for i in range(n_seps - 1)]
+            avg_gap = sum(gaps) / len(gaps)
+            for gap in gaps:
+                if abs(gap - avg_gap) > avg_gap * 0.5:
+                    low_confidence = True
+                    break
+
+        if low_confidence:
+            return _equidistant_separators()
+
+        return [(x, x) for x in separators]
+
+    # Didn't find enough separators — use equidistant
+    return _equidistant_separators()
 
 
 def estimate_columns_sample(file_paths: List[str], max_sample: int = 5) -> int:
@@ -290,6 +336,48 @@ def estimate_columns_sample(file_paths: List[str], max_sample: int = 5) -> int:
     # Return the mode (most common value)
     from collections import Counter
     return Counter(counts).most_common(1)[0][0]
+
+
+def estimate_content_bounds(image_path: str) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Estimate the left and right content boundaries of a scanned document.
+
+    Uses vertical projection profile to find where the content starts and ends.
+    Returns ((left_top, left_bottom), (right_top, right_bottom)) — initially vertical.
+    """
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return ((0.0, 0.0), (100.0, 100.0))
+
+    h, w = img.shape
+    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    col_sums = np.sum(binary, axis=0) / 255
+    kernel_size = max(w // 80, 5) | 1
+    smoothed = np.convolve(col_sums, np.ones(kernel_size) / kernel_size, mode="same")
+
+    mean_val = np.mean(smoothed)
+    if mean_val < 1:
+        # No content detected, return small margins
+        return ((w * 0.05, w * 0.05), (w * 0.95, w * 0.95))
+
+    # Threshold for detecting content
+    content_thresh = mean_val * 0.1
+
+    # Find left boundary: first column with significant content
+    left_x = 0
+    for i in range(w):
+        if smoothed[i] > content_thresh:
+            left_x = max(0, i - 5)  # Small padding
+            break
+
+    # Find right boundary: last column with significant content
+    right_x = w
+    for i in range(w - 1, -1, -1):
+        if smoothed[i] > content_thresh:
+            right_x = min(w, i + 5)  # Small padding
+            break
+
+    return ((float(left_x), float(left_x)), (float(right_x), float(right_x)))
 
 
 def _sep_x_at_y(
@@ -375,6 +463,7 @@ def detect_paragraphs(
     horizontal_reach: float = 1.0,
     n_columns: int = 1,
     separators: List[float] | None = None,
+    content_bounds: Tuple[Tuple[float, float], Tuple[float, float]] | None = None,
 ) -> List[BBox]:
     """Detect paragraph-like text blocks in a scanned document image.
 
@@ -393,6 +482,9 @@ def detect_paragraphs(
         Explicit x-positions of column separator lines.  When provided,
         boxes that span across a separator are never merged, and the
         separator positions are used for column-aware sorting.
+    content_bounds : tuple, optional
+        ((left_top, left_bottom), (right_top, right_bottom)) content area bounds.
+        Boxes that fall mostly outside these bounds will be filtered out.
     """
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -538,6 +630,18 @@ def detect_paragraphs(
         if bw * bh > w * h * 0.8:
             continue  # skip near-full-page
 
+        # Filter by content bounds if provided
+        if content_bounds:
+            left_bound, right_bound = content_bounds
+            box_cy = by + bh / 2.0
+            # Interpolate left and right bounds at the box's vertical center
+            left_x = left_bound[0] + (left_bound[1] - left_bound[0]) * (box_cy / h) if h > 0 else left_bound[0]
+            right_x = right_bound[0] + (right_bound[1] - right_bound[0]) * (box_cy / h) if h > 0 else right_bound[0]
+            box_cx = bx + bw / 2.0
+            # Skip if the box center is outside the content area
+            if box_cx < left_x or box_cx > right_x:
+                continue
+
         # Small padding
         pad = 3
         bx = max(0, bx - pad)
@@ -560,6 +664,7 @@ def auto_segment_page(
     horizontal_reach: float = 1.0,
     n_columns: int = 1,
     separators: List[Tuple[float, float]] | None = None,
+    content_bounds: Tuple[Tuple[float, float], Tuple[float, float]] | None = None,
 ) -> int:
     """Run auto-detection on a single page and add segments.
 
@@ -577,6 +682,7 @@ def auto_segment_page(
         horizontal_reach=horizontal_reach,
         n_columns=n_columns,
         separators=separators,
+        content_bounds=content_bounds,
     )
     added = 0
     for x, y, bw, bh in boxes:
