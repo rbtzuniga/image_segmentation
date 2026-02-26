@@ -147,6 +147,96 @@ def _vertical_gap(a: BBox, b: BBox) -> float:
 
 # ── Binarization ─────────────────────────────────────────────────────────
 
+def _detect_edge_shadow(img: np.ndarray, side: str = "left") -> int:
+    """Detect vertical shadow band at image edge.
+    
+    Returns the width of the shadow band to mask out.
+    """
+    h, w = img.shape
+    margin = min(w // 4, 200)  # Check up to 25% of width or 200px
+    
+    if side == "left":
+        strip = img[:, :margin]
+    else:
+        strip = img[:, -margin:]
+    
+    # Calculate column-wise mean intensity
+    col_means = np.mean(strip, axis=0)
+    
+    # Find where the shadow ends (intensity jumps up significantly)
+    overall_mean = np.mean(img)
+    threshold = overall_mean * 0.85  # Shadow is darker than 85% of overall
+    
+    shadow_width = 0
+    if side == "left":
+        for i, val in enumerate(col_means):
+            if val < threshold:
+                shadow_width = i + 1
+            else:
+                # Allow small gaps in shadow detection
+                if i - shadow_width > 10:
+                    break
+    else:
+        for i in range(len(col_means) - 1, -1, -1):
+            if col_means[i] < threshold:
+                shadow_width = margin - i
+            else:
+                if (margin - i) - shadow_width > 10:
+                    break
+    
+    # Only return if shadow is substantial (> 2% of width)
+    if shadow_width > w * 0.02:
+        return shadow_width
+    return 0
+
+
+def _apply_clahe(img: np.ndarray) -> np.ndarray:
+    """Apply CLAHE for contrast enhancement."""
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return clahe.apply(img)
+
+
+def _filter_low_contrast_regions(binary: np.ndarray, gray: np.ndarray) -> np.ndarray:
+    """Remove foreground pixels in low-contrast (shadow) regions.
+    
+    Real text has high local contrast; shadows have uniform low intensity.
+    """
+    h, w = gray.shape
+    
+    # Calculate local variance using a window
+    block_size = max(min(h, w) // 30, 15) | 1
+    
+    # Use integral images for fast local variance calculation
+    gray_f = gray.astype(np.float32)
+    mean = cv2.blur(gray_f, (block_size, block_size))
+    sqr_mean = cv2.blur(gray_f ** 2, (block_size, block_size))
+    variance = sqr_mean - mean ** 2
+    variance = np.maximum(variance, 0)  # Clamp negative values due to floating point
+    
+    # Create mask where variance is too low (shadow regions)
+    # Threshold based on median variance of foreground pixels
+    fg_mask = binary > 0
+    if np.sum(fg_mask) > 100:
+        fg_variance = variance[fg_mask]
+        median_var = np.median(fg_variance)
+        # Remove pixels where local variance is < 10% of median
+        # These are likely shadow artifacts, not real text
+        var_thresh = max(median_var * 0.1, 50)  # Minimum threshold
+        low_contrast_mask = variance < var_thresh
+        
+        # Only apply to areas that are also relatively dark in the original
+        # (text should be dark, but in high-contrast areas)
+        dark_mask = gray < np.mean(gray)
+        shadow_mask = low_contrast_mask & dark_mask
+        
+        # Remove shadow artifacts from binary
+        result = binary.copy()
+        result[shadow_mask] = 0
+        return result
+    
+    return binary
+
+
 def _simple_binarize(img: np.ndarray) -> Tuple[np.ndarray, bool]:
     """Fast binarization using Otsu. Returns (binary, success).
     
@@ -162,33 +252,99 @@ def _robust_binarize_full(img: np.ndarray) -> np.ndarray:
     """Full robust binarization for difficult images with shading."""
     h, w = img.shape
 
-    # Background normalization using Gaussian blur (faster than morphology)
+    # Detect and mask edge shadows
+    left_shadow = _detect_edge_shadow(img, "left")
+    right_shadow = _detect_edge_shadow(img, "right")
+    
+    # Create working copy, fill shadow areas with local background estimate
+    working = img.copy()
+    if left_shadow > 0:
+        # Estimate background from just beyond the shadow
+        bg_sample_start = min(left_shadow + 10, w - 1)
+        bg_sample_end = min(left_shadow + 50, w)
+        if bg_sample_end > bg_sample_start:
+            local_bg = int(np.median(img[:, bg_sample_start:bg_sample_end]))
+            working[:, :left_shadow] = local_bg
+    if right_shadow > 0:
+        bg_sample_end = max(w - right_shadow - 10, 0)
+        bg_sample_start = max(w - right_shadow - 50, 0)
+        if bg_sample_end > bg_sample_start:
+            local_bg = int(np.median(img[:, bg_sample_start:bg_sample_end]))
+            working[:, -right_shadow:] = local_bg
+
+    # Apply CLAHE for contrast enhancement (helps with gray backgrounds)
+    enhanced = _apply_clahe(working)
+    
+    # Try Otsu on CLAHE-enhanced image first
+    _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    fg_ratio = np.sum(binary > 0) / (h * w)
+    
+    if 0.005 <= fg_ratio <= 0.4:
+        # Mask out shadow regions in result
+        if left_shadow > 0:
+            binary[:, :left_shadow] = 0
+        if right_shadow > 0:
+            binary[:, -right_shadow:] = 0
+        # Filter low-contrast shadow artifacts
+        binary = _filter_low_contrast_regions(binary, img)
+        return binary
+
+    # Background normalization using Gaussian blur
     blur_size = max(w // 10, 51) | 1
-    background = cv2.GaussianBlur(img, (blur_size, blur_size), 0)
+    background = cv2.GaussianBlur(working, (blur_size, blur_size), 0)
     
     # Normalize: divide image by background
-    normalized = cv2.divide(img, background, scale=255)
+    normalized = cv2.divide(working, background, scale=255)
+
+    # Apply CLAHE to normalized image as well
+    normalized = _apply_clahe(normalized)
 
     # Try Otsu on normalized
     _, binary = cv2.threshold(normalized, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     fg_ratio = np.sum(binary > 0) / (h * w)
     
     if 0.005 <= fg_ratio <= 0.4:
+        if left_shadow > 0:
+            binary[:, :left_shadow] = 0
+        if right_shadow > 0:
+            binary[:, -right_shadow:] = 0
+        # Filter low-contrast shadow artifacts
+        binary = _filter_low_contrast_regions(binary, img)
         return binary
 
-    # Fallback to adaptive thresholding
-    block_size = max(h // 40, 31) | 1
+    # Fallback to adaptive thresholding with smaller block size
+    block_size = max(h // 60, 21) | 1
     adaptive = cv2.adaptiveThreshold(
         normalized, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV,
-        block_size, 8
+        block_size, 6
     )
+    
+    # Clean up noise with morphological opening
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    adaptive = cv2.morphologyEx(adaptive, cv2.MORPH_OPEN, kernel)
+    
+    # Mask out shadow regions
+    if left_shadow > 0:
+        adaptive[:, :left_shadow] = 0
+    if right_shadow > 0:
+        adaptive[:, -right_shadow:] = 0
+    
+    # Filter low-contrast shadow artifacts
+    adaptive = _filter_low_contrast_regions(adaptive, img)
+    
     return adaptive
 
 
 def _robust_binarize(img: np.ndarray) -> np.ndarray:
     """Smart binarization: tries fast method first, falls back to robust."""
+    # Check for edge shadows first - if present, use robust path
+    left_shadow = _detect_edge_shadow(img, "left")
+    right_shadow = _detect_edge_shadow(img, "right")
+    if left_shadow > 0 or right_shadow > 0:
+        return _robust_binarize_full(img)
+    
     binary, success = _simple_binarize(img)
     if success:
         return binary
