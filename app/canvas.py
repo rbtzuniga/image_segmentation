@@ -91,6 +91,8 @@ class CanvasView(QGraphicsView):
         self._dragging_edge: int = -1  # edge index being dragged (-1 = none)
         self._drag_edge_seg_idx: int = -1
         self._drag_edge_last: Optional[QPointF] = None  # last mouse pos during edge drag
+        self._dragging_segment: bool = False  # whether we're dragging an entire segment
+        self._drag_seg_last: Optional[QPointF] = None  # last mouse pos during segment drag
         self._multi_selected: Dict[str, Set[int]] = {}  # file_path → set of selected segment indices
 
     # ── public API ───────────────────────────────────────────────────────
@@ -449,6 +451,10 @@ class CanvasView(QGraphicsView):
             self._active_segment_idx = hit
             if hit >= 0:
                 self._multi_selected[self._page_data.file_path] = {hit}
+                # Start segment drag
+                self._dragging_segment = True
+                self._drag_seg_last = pos
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
             self.segment_selected.emit(hit)
             self.viewport().update()
 
@@ -606,6 +612,15 @@ class CanvasView(QGraphicsView):
             self._drag_edge_last = pos
             self.viewport().update()
 
+        elif self._dragging_segment and self._drag_seg_last is not None and self._active_segment_idx >= 0:
+            seg = self._page_data.segments[self._active_segment_idx]
+            dx = img_x - self._drag_seg_last.x()
+            dy = img_y - self._drag_seg_last.y()
+            # Move all vertices
+            seg.vertices = [(v[0] + dx, v[1] + dy) for v in seg.vertices]
+            self._drag_seg_last = pos
+            self.viewport().update()
+
         else:
             # Hover: update cursor when over an edge of the active segment
             if (self._tool == "select" and self._page_data
@@ -666,6 +681,13 @@ class CanvasView(QGraphicsView):
                 self._dragging_edge = -1
                 self._drag_edge_seg_idx = -1
                 self._drag_edge_last = None
+                self.setCursor(
+                    Qt.CursorShape.CrossCursor if self._tool == "segment" else Qt.CursorShape.ArrowCursor
+                )
+                self.segments_changed.emit()
+            if self._dragging_segment:
+                self._dragging_segment = False
+                self._drag_seg_last = None
                 self.setCursor(
                     Qt.CursorShape.CrossCursor if self._tool == "segment" else Qt.CursorShape.ArrowCursor
                 )

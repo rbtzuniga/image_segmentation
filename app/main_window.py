@@ -24,7 +24,7 @@ from app.auto_segment import (
 )
 from app.canvas import CanvasView
 from app.export import export_all
-from app.segment import PageData
+from app.segment import PageData, Segment
 from app.settings_panel import SettingsPanel
 from app.thumbnail_panel import ThumbnailPanel
 
@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         self._settings.auto_segment_page_clicked.connect(self._on_auto_segment_page)
         self._settings.auto_segment_all_clicked.connect(self._on_auto_segment_all)
         self._settings.relabel_page_clicked.connect(self._on_relabel_page)
+        self._settings.add_segment_grid_clicked.connect(self._on_add_segment_grid)
         self._settings.delete_segment_clicked.connect(self._canvas.delete_selected_segment)
         self._settings.split_segment_clicked.connect(self._canvas.split_selected_segment)
         self._settings.combine_clicked.connect(self._canvas._request_combine)
@@ -313,6 +314,85 @@ class MainWindow(QMainWindow):
         self._canvas.segments_changed.emit()
         self._status.showMessage(
             f"Auto-detected {total} segment{'s' if total != 1 else ''} across {len(self._ordered_paths)} pages."
+        )
+
+    def _on_add_segment_grid(self, n_rows: int) -> None:
+        """Create a grid of segments on the current page.
+        
+        Deletes all existing segments and creates n_rows segments per column,
+        where column width is determined by separators/content bounds.
+        """
+        page = self._canvas.current_page_data()
+        if not page:
+            QMessageBox.warning(self, "No Page", "Please select a page first.")
+            return
+        
+        # Get image dimensions
+        from PyQt6.QtGui import QPixmap
+        pixmap = QPixmap(page.file_path)
+        if pixmap.isNull():
+            return
+        img_w = pixmap.width()
+        img_h = pixmap.height()
+        
+        # Determine column boundaries
+        n_columns = self._settings.n_columns
+        
+        # Get content bounds or use full image width
+        if page.content_bounds:
+            left_bound, right_bound = page.content_bounds
+            # Use average of top/bottom for each bound
+            left_x = (left_bound[0] + left_bound[1]) / 2
+            right_x = (right_bound[0] + right_bound[1]) / 2
+        else:
+            left_x = 0
+            right_x = img_w
+        
+        # Build column x-positions from separators
+        column_edges = [left_x]
+        if page.column_separators:
+            for x_top, x_bot in page.column_separators:
+                sep_x = (x_top + x_bot) / 2
+                if left_x < sep_x < right_x:
+                    column_edges.append(sep_x)
+        column_edges.append(right_x)
+        column_edges.sort()
+        
+        # Clear existing segments
+        page.segments.clear()
+        
+        # Calculate row height
+        row_height = img_h / n_rows
+        
+        # Create segments
+        offset = self._settings.offset
+        for col_idx in range(len(column_edges) - 1):
+            col_left = column_edges[col_idx]
+            col_right = column_edges[col_idx + 1]
+            
+            for row_idx in range(n_rows):
+                y_top = row_idx * row_height
+                y_bot = (row_idx + 1) * row_height
+                
+                label = page.next_label(offset)
+                seg = Segment(
+                    label=label,
+                    vertices=[
+                        (col_left, y_top),   # top-left
+                        (col_right, y_top),  # top-right
+                        (col_right, y_bot),  # bottom-right
+                        (col_left, y_bot),   # bottom-left
+                    ]
+                )
+                page.segments.append(seg)
+        
+        self._canvas.clear_multi_selection()
+        self._canvas.viewport().update()
+        self._canvas.segments_changed.emit()
+        n_segs = len(page.segments)
+        self._status.showMessage(
+            f"Created {n_segs} segment{'s' if n_segs != 1 else ''} "
+            f"({n_rows} rows × {len(column_edges) - 1} column{'s' if len(column_edges) > 2 else ''})."
         )
 
     def _on_multi_delete(self, to_delete: dict) -> None:
