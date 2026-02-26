@@ -212,7 +212,7 @@ class SettingsPanel(QWidget):
             "QPushButton { background-color: #FFCCCC; }"
         )
 
-        self._btn_delete = QPushButton("Delete Selected Segment")
+        self._btn_delete = QPushButton("Delete Selected Segment(s)")
         self._btn_delete.setStyleSheet(_del_btn_style)
         self._btn_delete.clicked.connect(self.delete_segment_clicked.emit)
         delete_layout.addWidget(self._btn_delete)

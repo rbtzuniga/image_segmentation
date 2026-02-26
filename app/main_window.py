@@ -92,6 +92,7 @@ class MainWindow(QMainWindow):
         self._canvas.segment_selected.connect(self._on_segment_selected)
         self._canvas.segments_changed.connect(self._on_segments_changed)
         self._canvas.tool_switched.connect(self._settings._set_tool)
+        self._canvas.multi_delete_requested.connect(self._on_multi_delete)
 
         # Label edit committed
         self._settings.label_edit.editingFinished.connect(self._on_label_edited)
@@ -218,11 +219,28 @@ class MainWindow(QMainWindow):
             f"Auto-detected {total} segment{'s' if total != 1 else ''} across {len(self._ordered_paths)} pages."
         )
 
+    def _on_multi_delete(self, to_delete: dict) -> None:
+        """Delete segments across multiple pages based on multi-selection."""
+        total = 0
+        for fp, indices in to_delete.items():
+            if fp in self._pages:
+                page = self._pages[fp]
+                for idx in sorted(indices, reverse=True):
+                    if 0 <= idx < len(page.segments):
+                        del page.segments[idx]
+                        total += 1
+        self._canvas.segments_changed.emit()
+        self._canvas.viewport().update()
+        self._status.showMessage(
+            f"Deleted {total} segment{'s' if total != 1 else ''}."
+        )
+
     def _on_delete_all_page(self) -> None:
         page = self._canvas.current_page_data()
         if not page:
             return
         page.segments.clear()
+        self._canvas.clear_multi_selection(page.file_path)
         self._canvas.select_segment(-1)
         self._canvas.segments_changed.emit()
         self._canvas.viewport().update()
@@ -255,6 +273,7 @@ class MainWindow(QMainWindow):
         for page in self._pages.values():
             total += len(page.segments)
             page.segments.clear()
+        self._canvas.clear_multi_selection()
         self._canvas.select_segment(-1)
         self._canvas.segments_changed.emit()
         self._canvas.viewport().update()
