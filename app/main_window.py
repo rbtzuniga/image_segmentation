@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
         self._pages: Dict[str, PageData] = {}
         self._ordered_paths: List[str] = []
         self._current_page_idx: int = -1
+        self._next_combined_id: int = 0
 
         self._build_ui()
         self._connect_signals()
@@ -73,6 +74,7 @@ class MainWindow(QMainWindow):
         # Thumbnail → canvas
         self._thumb_panel.folder_loaded.connect(self._on_folder_loaded)
         self._thumb_panel.page_selected.connect(self._on_page_selected)
+        self._thumb_panel.page_removed.connect(self._on_page_removed)
 
         # Settings → canvas / export
         self._settings.tool_changed.connect(self._canvas.set_tool)
@@ -83,6 +85,8 @@ class MainWindow(QMainWindow):
         self._settings.relabel_page_clicked.connect(self._on_relabel_page)
         self._settings.delete_segment_clicked.connect(self._canvas.delete_selected_segment)
         self._settings.split_segment_clicked.connect(self._canvas.split_selected_segment)
+        self._settings.combine_clicked.connect(self._canvas._request_combine)
+        self._settings.uncombine_clicked.connect(self._canvas._request_uncombine)
         self._canvas.relabel_requested.connect(self._on_relabel_page)
         self._settings.delete_all_page_clicked.connect(self._on_delete_all_page)
         self._settings.delete_all_all_clicked.connect(self._on_delete_all_all)
@@ -92,6 +96,9 @@ class MainWindow(QMainWindow):
         self._canvas.segment_selected.connect(self._on_segment_selected)
         self._canvas.segments_changed.connect(self._on_segments_changed)
         self._canvas.tool_switched.connect(self._settings._set_tool)
+        self._canvas.multi_delete_requested.connect(self._on_multi_delete)
+        self._canvas.combine_requested.connect(self._on_combine)
+        self._canvas.uncombine_requested.connect(self._on_uncombine)
 
         # Label edit committed
         self._settings.label_edit.editingFinished.connect(self._on_label_edited)
@@ -131,6 +138,27 @@ class MainWindow(QMainWindow):
             self._status.showMessage(
                 f"Page {index + 1}/{len(self._ordered_paths)}: {path}"
             )
+
+    def _on_page_removed(self, index: int) -> None:
+        """Remove a page from the project (does not delete the file on disk)."""
+        if 0 <= index < len(self._ordered_paths):
+            path = self._ordered_paths.pop(index)
+            self._pages.pop(path, None)
+            self._canvas.clear_multi_selection(path)
+
+            remaining = len(self._ordered_paths)
+            if remaining == 0:
+                self._current_page_idx = -1
+                self._canvas._scene.clear()
+                self._canvas._pixmap_item = None
+                self._canvas._page_data = None
+                self._status.showMessage("All pages removed.")
+            else:
+                new_idx = min(index, remaining - 1)
+                self._thumb_panel.select_page(new_idx)
+                self._status.showMessage(
+                    f"Removed page. {remaining} page{'s' if remaining != 1 else ''} remaining."
+                )
 
     def _on_segment_selected(self, seg_idx: int) -> None:
         page = self._canvas.current_page_data()
@@ -193,6 +221,7 @@ class MainWindow(QMainWindow):
             page, offset, **self._auto_params(),
             separators=page.column_separators or None,
         )
+        self._canvas.clear_multi_selection()
         self._canvas.viewport().update()
         self._canvas.segments_changed.emit()
         self._status.showMessage(
@@ -212,17 +241,146 @@ class MainWindow(QMainWindow):
                 page, offset, **params,
                 separators=page.column_separators or None,
             )
+        self._canvas.clear_multi_selection()
         self._canvas.viewport().update()
         self._canvas.segments_changed.emit()
         self._status.showMessage(
             f"Auto-detected {total} segment{'s' if total != 1 else ''} across {len(self._ordered_paths)} pages."
         )
 
+    def _on_multi_delete(self, to_delete: dict) -> None:
+        """Delete segments across multiple pages based on multi-selection."""
+        # First, uncombine partners of any combined segments being deleted
+        for fp, indices in to_delete.items():
+            if fp in self._pages:
+                page = self._pages[fp]
+                for idx in indices:
+                    if 0 <= idx < len(page.segments):
+                        seg = page.segments[idx]
+                        if seg.combined_id:
+                            self._uncombine_partner(seg.combined_id, fp, idx)
+
+        # Then delete (reverse order to preserve indices)
+        total = 0
+        for fp, indices in to_delete.items():
+            if fp in self._pages:
+                page = self._pages[fp]
+                for idx in sorted(indices, reverse=True):
+                    if 0 <= idx < len(page.segments):
+                        del page.segments[idx]
+                        total += 1
+        self._canvas.segments_changed.emit()
+        self._canvas.viewport().update()
+        self._status.showMessage(
+            f"Deleted {total} segment{'s' if total != 1 else ''}."
+        )
+
+    def _uncombine_partner(self, combined_id: str, exclude_fp: str, exclude_idx: int) -> None:
+        """Find and uncombine the partner of a combined segment being deleted."""
+        for fp in self._ordered_paths:
+            page = self._pages[fp]
+            for i, seg in enumerate(page.segments):
+                if seg.combined_id == combined_id and not (fp == exclude_fp and i == exclude_idx):
+                    if seg.combined_role == "top":
+                        seg.label = seg.label.removesuffix("_top")
+                    elif seg.combined_role == "bottom":
+                        seg.label = seg.label.removesuffix("_bottom")
+                    seg.combined_id = None
+                    seg.combined_role = None
+                    return
+
+    def _on_combine(self, selection: dict) -> None:
+        """Combine exactly two selected segments as a top/bottom pair."""
+        entries = []
+        for fp, indices in selection.items():
+            if fp not in self._pages:
+                continue
+            page = self._pages[fp]
+            page_idx = self._ordered_paths.index(fp)
+            for seg_idx in indices:
+                if 0 <= seg_idx < len(page.segments):
+                    entries.append((page_idx, fp, seg_idx, page.segments[seg_idx]))
+
+        if len(entries) != 2:
+            QMessageBox.warning(self, "Combine", "Select exactly 2 segments to combine.")
+            return
+
+        for _, _, _, seg in entries:
+            if seg.combined_id:
+                QMessageBox.warning(
+                    self, "Combine",
+                    "One of the selected segments is already combined.\n"
+                    "Delete or uncombine it first.",
+                )
+                return
+
+        # Determine top and bottom:
+        #   different pages → smaller page number is top
+        #   same page → leftmost (smaller centroid-X) is top
+        #   same column → topmost (smaller centroid-Y) is top
+        def _sort_key(entry):
+            page_idx, fp, seg_idx, seg = entry
+            cx = sum(v[0] for v in seg.vertices) / len(seg.vertices)
+            cy = sum(v[1] for v in seg.vertices) / len(seg.vertices)
+            return (page_idx, cx, cy)
+
+        entries.sort(key=_sort_key)
+        top_seg = entries[0][3]
+        bottom_seg = entries[1][3]
+
+        self._next_combined_id += 1
+        cid = str(self._next_combined_id)
+        base_label = top_seg.label
+
+        top_seg.combined_id = cid
+        top_seg.combined_role = "top"
+        top_seg.label = f"{base_label}_top"
+
+        bottom_seg.combined_id = cid
+        bottom_seg.combined_role = "bottom"
+        bottom_seg.label = f"{base_label}_bottom"
+
+        self._canvas.clear_multi_selection()
+        self._canvas.segments_changed.emit()
+        self._canvas.viewport().update()
+        self._status.showMessage(
+            f"Combined segments as '{base_label}_top' and '{base_label}_bottom'."
+        )
+
+    def _on_uncombine(self, file_path: str, seg_idx: int) -> None:
+        """Uncombine a segment and its partner."""
+        if file_path not in self._pages:
+            return
+        page = self._pages[file_path]
+        if not (0 <= seg_idx < len(page.segments)):
+            return
+        seg = page.segments[seg_idx]
+        if not seg.combined_id:
+            return
+
+        combined_id = seg.combined_id
+
+        # Restore this segment
+        if seg.combined_role == "top":
+            seg.label = seg.label.removesuffix("_top")
+        elif seg.combined_role == "bottom":
+            seg.label = seg.label.removesuffix("_bottom")
+        seg.combined_id = None
+        seg.combined_role = None
+
+        # Find and restore the partner
+        self._uncombine_partner(combined_id, file_path, seg_idx)
+
+        self._canvas.segments_changed.emit()
+        self._canvas.viewport().update()
+        self._status.showMessage("Uncombined segment pair.")
+
     def _on_delete_all_page(self) -> None:
         page = self._canvas.current_page_data()
         if not page:
             return
         page.segments.clear()
+        self._canvas.clear_multi_selection(page.file_path)
         self._canvas.select_segment(-1)
         self._canvas.segments_changed.emit()
         self._canvas.viewport().update()
@@ -242,6 +400,10 @@ class MainWindow(QMainWindow):
         n_columns = self._settings.n_columns
         relabel_page(page, offset, n_columns,
                      separators=page.column_separators or None)
+        # Update bottom partners (may be on other pages)
+        self._update_bottom_partners(page)
+        # Clear stale multi-selection (segment indices changed after sort)
+        self._canvas.clear_multi_selection()
         self._canvas.select_segment(-1)
         self._canvas.viewport().update()
         self._canvas.segments_changed.emit()
@@ -250,11 +412,25 @@ class MainWindow(QMainWindow):
             f"on page {self._current_page_idx + 1}."
         )
 
+    def _update_bottom_partners(self, page: PageData) -> None:
+        """After relabeling, update every bottom partner whose top lives on *page*."""
+        for seg in page.segments:
+            if seg.combined_role == "top" and seg.combined_id:
+                base_label = seg.label.removesuffix("_top")
+                # Find its bottom partner (could be on any page)
+                for fp in self._ordered_paths:
+                    other_page = self._pages[fp]
+                    for other_seg in other_page.segments:
+                        if (other_seg.combined_id == seg.combined_id
+                                and other_seg.combined_role == "bottom"):
+                            other_seg.label = f"{base_label}_bottom"
+
     def _on_delete_all_all(self) -> None:
         total = 0
         for page in self._pages.values():
             total += len(page.segments)
             page.segments.clear()
+        self._canvas.clear_multi_selection()
         self._canvas.select_segment(-1)
         self._canvas.segments_changed.emit()
         self._canvas.viewport().update()

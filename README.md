@@ -4,7 +4,7 @@ A Python GUI application for segmenting scanned document images into labeled reg
 
 ## Demo
 Here's a quick demo of the tool in action: 
-[Demo](https://www.dropbox.com/scl/fi/92zzuju8zt55cw2e8xuoj/img_seg_usage.mp4?rlkey=ua4o2ci2z8m5hz4tk5p77b8ms&st=nlp52qdg&dl=0)
+[Demo](https://www.dropbox.com/scl/fi/b1ss1fh12wutqwujjpmpn/img_seg_demo.mp4?rlkey=oyyyp8puvguri440uq3c5aqp0&st=zqtcoqdx&dl=0)
 
 ## Features
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal, QRectF
 from PyQt6.QtGui import (
@@ -35,6 +35,13 @@ SEPARATOR_COLOR = QColor(0, 180, 60, 160)
 SEPARATOR_COLOR_ACTIVE = QColor(0, 220, 80, 220)
 SEPARATOR_HIT_TOLERANCE = 8  # pixels (screen) for grabbing a separator
 
+# Colors for combined segments
+EDGE_COLOR_COMBINED = QColor(160, 0, 200)
+EDGE_COLOR_COMBINED_SELECTED = QColor(200, 80, 255)
+FILL_COLOR_COMBINED = QColor(160, 0, 200, 60)
+FILL_COLOR_COMBINED_SELECTED = QColor(200, 80, 255, 70)
+LABEL_BG_COMBINED = QColor(160, 0, 200, 200)
+
 
 class CanvasView(QGraphicsView):
     """Zoomable / pannable graphics view that hosts the canvas scene."""
@@ -44,6 +51,9 @@ class CanvasView(QGraphicsView):
     tool_switched = pyqtSignal(str)  # Emitted when tool changes via canvas interaction (e.g. right-click)
     separators_changed = pyqtSignal()  # Emitted when column separators are moved
     relabel_requested = pyqtSignal()  # Emitted when user presses R
+    multi_delete_requested = pyqtSignal(dict)  # {file_path: {seg_indices}} for cross-page deletion
+    combine_requested = pyqtSignal(dict)  # {file_path: {seg_indices}} for combining 2 segments
+    uncombine_requested = pyqtSignal(str, int)  # (file_path, seg_index) to uncombine a segment
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -74,6 +84,7 @@ class CanvasView(QGraphicsView):
         self._dragging_edge: int = -1  # edge index being dragged (-1 = none)
         self._drag_edge_seg_idx: int = -1
         self._drag_edge_last: Optional[QPointF] = None  # last mouse pos during edge drag
+        self._multi_selected: Dict[str, Set[int]] = {}  # file_path → set of selected segment indices
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -114,13 +125,28 @@ class CanvasView(QGraphicsView):
         self.segment_selected.emit(idx)
         self.viewport().update()
 
+    def clear_multi_selection(self, file_path: str = None) -> None:
+        """Clear multi-selection, optionally only for a specific page."""
+        if file_path:
+            self._multi_selected.pop(file_path, None)
+        else:
+            self._multi_selected.clear()
+
     def delete_selected_segment(self) -> None:
+        """Delete all selected segments (multi-selection aware)."""
+        # Ensure active segment on current page is included
         if self._page_data and 0 <= self._active_segment_idx < len(self._page_data.segments):
-            del self._page_data.segments[self._active_segment_idx]
-            self._active_segment_idx = -1
-            self.segments_changed.emit()
-            self.segment_selected.emit(-1)
-            self.viewport().update()
+            fp = self._page_data.file_path
+            self._multi_selected.setdefault(fp, set()).add(self._active_segment_idx)
+
+        if not self._multi_selected:
+            return
+
+        self.multi_delete_requested.emit(dict(self._multi_selected))
+        self._multi_selected.clear()
+        self._active_segment_idx = -1
+        self.segment_selected.emit(-1)
+        self.viewport().update()
 
     def split_selected_segment(self) -> None:
         """Split the selected segment horizontally at its vertical midpoint."""
@@ -283,6 +309,40 @@ class CanvasView(QGraphicsView):
         img_x, img_y = pos.x(), pos.y()
 
         if self._tool == "select":
+            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+            if ctrl:
+                # Ctrl+click: toggle segment in/out of multi-selection
+                hit = -1
+                for i, seg in enumerate(self._page_data.segments):
+                    vi = seg.vertex_at(img_x, img_y, radius=VERTEX_RADIUS / self._zoom * 2)
+                    if vi is not None:
+                        hit = i
+                        break
+                if hit < 0:
+                    for i, seg in enumerate(self._page_data.segments):
+                        if seg.contains_point(img_x, img_y):
+                            hit = i
+                            break
+                if hit >= 0:
+                    fp = self._page_data.file_path
+                    sel = self._multi_selected.setdefault(fp, set())
+                    if hit in sel:
+                        sel.discard(hit)
+                        if not sel:
+                            del self._multi_selected[fp]
+                        if hit == self._active_segment_idx:
+                            self._active_segment_idx = -1
+                    else:
+                        sel.add(hit)
+                        self._active_segment_idx = hit
+                    self.segment_selected.emit(self._active_segment_idx)
+                    self.viewport().update()
+                return
+
+            # Non-Ctrl click: clear multi-selection
+            self._multi_selected.clear()
+
             # Check separator hit first
             sep_idx, sep_ep = self._separator_at(img_x, img_y)
             if sep_idx >= 0:
@@ -298,6 +358,7 @@ class CanvasView(QGraphicsView):
                 if vi is not None:
                     self._dragging_vertex = vi
                     self._drag_segment_idx = self._active_segment_idx
+                    self._multi_selected[self._page_data.file_path] = {self._active_segment_idx}
                     return
 
                 # Check edge hit on active segment
@@ -306,6 +367,7 @@ class CanvasView(QGraphicsView):
                     self._dragging_edge = ei
                     self._drag_edge_seg_idx = self._active_segment_idx
                     self._drag_edge_last = pos
+                    self._multi_selected[self._page_data.file_path] = {self._active_segment_idx}
                     self.setCursor(self._edge_cursor(seg, ei))
                     return
 
@@ -316,6 +378,7 @@ class CanvasView(QGraphicsView):
                     self._active_segment_idx = i
                     self._dragging_vertex = vi
                     self._drag_segment_idx = i
+                    self._multi_selected[self._page_data.file_path] = {i}
                     self.segment_selected.emit(i)
                     self.viewport().update()
                     return
@@ -327,6 +390,8 @@ class CanvasView(QGraphicsView):
                     hit = i
                     break
             self._active_segment_idx = hit
+            if hit >= 0:
+                self._multi_selected[self._page_data.file_path] = {hit}
             self.segment_selected.emit(hit)
             self.viewport().update()
 
@@ -497,8 +562,34 @@ class CanvasView(QGraphicsView):
             self.split_selected_segment()
         elif event.key() == Qt.Key.Key_R:
             self.relabel_requested.emit()
+        elif event.key() == Qt.Key.Key_C:
+            self._request_combine()
+        elif event.key() == Qt.Key.Key_U:
+            self._request_uncombine()
         else:
             super().keyPressEvent(event)
+
+    def _request_combine(self) -> None:
+        """Emit combine_requested if exactly 2 segments are multi-selected."""
+        # Include active segment in multi-selection
+        if self._page_data and 0 <= self._active_segment_idx < len(self._page_data.segments):
+            fp = self._page_data.file_path
+            self._multi_selected.setdefault(fp, set()).add(self._active_segment_idx)
+        total = sum(len(s) for s in self._multi_selected.values())
+        if total == 2:
+            self.combine_requested.emit(dict(self._multi_selected))
+            self._multi_selected.clear()
+            self._active_segment_idx = -1
+            self.segment_selected.emit(-1)
+            self.viewport().update()
+
+    def _request_uncombine(self) -> None:
+        """Uncombine the active segment if it is part of a combined pair."""
+        if self._page_data and 0 <= self._active_segment_idx < len(self._page_data.segments):
+            seg = self._page_data.segments[self._active_segment_idx]
+            if seg.combined_id:
+                self.uncombine_requested.emit(self._page_data.file_path, self._active_segment_idx)
+                self.viewport().update()
 
     # ── painting overlay ─────────────────────────────────────────────────
 
@@ -527,17 +618,24 @@ class CanvasView(QGraphicsView):
                 painter.drawEllipse(top, 5, 5)
                 painter.drawEllipse(bot, 5, 5)
 
+        page_selected = self._multi_selected.get(self._page_data.file_path, set()) if self._page_data else set()
         for i, seg in enumerate(self._page_data.segments):
             if len(seg.vertices) != 4:
                 continue
             is_active = i == self._active_segment_idx
-            self._paint_segment(painter, seg, is_active)
+            is_selected = i in page_selected
+            self._paint_segment(painter, seg, is_active, is_selected)
 
         painter.end()
 
-    def _paint_segment(self, painter: QPainter, seg: Segment, active: bool) -> None:
+    def _paint_segment(self, painter: QPainter, seg: Segment, active: bool, selected: bool = False) -> None:
         """Draw one segment overlay."""
+        highlight = active or selected
         pts = [QPointF(self.mapFromScene(QPointF(x, y))) for x, y in seg.vertices]
+
+        fill = FILL_COLOR_SELECTED if highlight else FILL_COLOR
+        edge_c = EDGE_COLOR_SELECTED if highlight else EDGE_COLOR
+        lbl_bg = LABEL_BG
 
         # Fill
         path = QPainterPath()
@@ -545,10 +643,10 @@ class CanvasView(QGraphicsView):
         for p in pts[1:]:
             path.lineTo(p)
         path.closeSubpath()
-        painter.fillPath(path, QBrush(FILL_COLOR_SELECTED if active else FILL_COLOR))
+        painter.fillPath(path, QBrush(fill))
 
         # Edges
-        pen = QPen(EDGE_COLOR_SELECTED if active else EDGE_COLOR, 2)
+        pen = QPen(edge_c, 2)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.drawPath(path)
@@ -556,7 +654,7 @@ class CanvasView(QGraphicsView):
         # Vertices
         if active:
             for p in pts:
-                painter.setPen(QPen(EDGE_COLOR_SELECTED, 1.5))
+                painter.setPen(QPen(edge_c, 1.5))
                 painter.setBrush(QBrush(VERTEX_COLOR))
                 painter.drawEllipse(p, VERTEX_RADIUS, VERTEX_RADIUS)
 
@@ -571,7 +669,7 @@ class CanvasView(QGraphicsView):
         th = fm.height() + 4
         label_rect = QRectF(cx - tw / 2, cy - th / 2, tw, th)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(LABEL_BG))
+        painter.setBrush(QBrush(lbl_bg))
         painter.drawRoundedRect(label_rect, 3, 3)
         painter.setPen(QPen(LABEL_COLOR))
         painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, text)

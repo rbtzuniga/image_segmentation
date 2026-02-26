@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 # A point is (x, y) in image-pixel coordinates.
 Point = Tuple[float, float]
@@ -19,6 +19,8 @@ class Segment:
 
     label: str
     vertices: List[Point] = field(default_factory=list)  # exactly 4 points
+    combined_id: Optional[str] = None   # shared ID linking a combined pair
+    combined_role: Optional[str] = None  # "top" or "bottom"
 
     # ── helpers ──────────────────────────────────────────────────────────
 

@@ -25,6 +25,8 @@ class SettingsPanel(QWidget):
     save_all_clicked = pyqtSignal()
     delete_segment_clicked = pyqtSignal()
     split_segment_clicked = pyqtSignal()
+    combine_clicked = pyqtSignal()
+    uncombine_clicked = pyqtSignal()
     delete_all_page_clicked = pyqtSignal()
     delete_all_all_clicked = pyqtSignal()
     auto_segment_page_clicked = pyqtSignal()
@@ -82,6 +84,22 @@ class SettingsPanel(QWidget):
         )
         self._btn_split.clicked.connect(self.split_segment_clicked.emit)
         form.addRow(self._btn_split)
+
+        self._btn_combine = QPushButton("Combine Selected  (press C)")
+        self._btn_combine.setToolTip(
+            "Combine two selected segments into a paired\n"
+            "top/bottom unit that exports as one image."
+        )
+        self._btn_combine.clicked.connect(self.combine_clicked.emit)
+        form.addRow(self._btn_combine)
+
+        self._btn_uncombine = QPushButton("Uncombine Selected  (press U)")
+        self._btn_uncombine.setToolTip(
+            "Uncombine the selected segment from its paired\n"
+            "top/bottom partner."
+        )
+        self._btn_uncombine.clicked.connect(self.uncombine_clicked.emit)
+        form.addRow(self._btn_uncombine)
 
         layout.addWidget(seg_group)
 
@@ -212,7 +230,7 @@ class SettingsPanel(QWidget):
             "QPushButton { background-color: #FFCCCC; }"
         )
 
-        self._btn_delete = QPushButton("Delete Selected Segment")
+        self._btn_delete = QPushButton("Delete Selected Segment(s)")
         self._btn_delete.setStyleSheet(_del_btn_style)
         self._btn_delete.clicked.connect(self.delete_segment_clicked.emit)
         delete_layout.addWidget(self._btn_delete)

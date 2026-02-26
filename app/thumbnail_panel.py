@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List
 
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QIcon
+from PyQt6.QtGui import QPixmap, QIcon, QKeyEvent
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -36,6 +36,8 @@ class ThumbnailPanel(QWidget):
 
     # Emitted when the user clicks a thumbnail.  Carries the 0-based page index.
     page_selected = pyqtSignal(int)
+    # Emitted when the user presses Delete on a thumbnail.  Carries the 0-based page index.
+    page_removed = pyqtSignal(int)
     # Emitted when a new input folder is loaded.  Carries the list of file paths.
     folder_loaded = pyqtSignal(list)
 
@@ -128,3 +130,15 @@ class ThumbnailPanel(QWidget):
     def _on_row_changed(self, row: int) -> None:
         if row >= 0:
             self.page_selected.emit(row)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            row = self._list.currentRow()
+            if 0 <= row < len(self._file_paths):
+                self._file_paths.pop(row)
+                self._list.takeItem(row)
+                count = len(self._file_paths)
+                self._label.setText(f"{count} page{'s' if count != 1 else ''} loaded")
+                self.page_removed.emit(row)
+        else:
+            super().keyPressEvent(event)
