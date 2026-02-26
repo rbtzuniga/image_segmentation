@@ -35,6 +35,13 @@ SEPARATOR_COLOR = QColor(0, 180, 60, 160)
 SEPARATOR_COLOR_ACTIVE = QColor(0, 220, 80, 220)
 SEPARATOR_HIT_TOLERANCE = 8  # pixels (screen) for grabbing a separator
 
+# Colors for combined segments
+EDGE_COLOR_COMBINED = QColor(160, 0, 200)
+EDGE_COLOR_COMBINED_SELECTED = QColor(200, 80, 255)
+FILL_COLOR_COMBINED = QColor(160, 0, 200, 60)
+FILL_COLOR_COMBINED_SELECTED = QColor(200, 80, 255, 70)
+LABEL_BG_COMBINED = QColor(160, 0, 200, 200)
+
 
 class CanvasView(QGraphicsView):
     """Zoomable / pannable graphics view that hosts the canvas scene."""
@@ -45,6 +52,8 @@ class CanvasView(QGraphicsView):
     separators_changed = pyqtSignal()  # Emitted when column separators are moved
     relabel_requested = pyqtSignal()  # Emitted when user presses R
     multi_delete_requested = pyqtSignal(dict)  # {file_path: {seg_indices}} for cross-page deletion
+    combine_requested = pyqtSignal(dict)  # {file_path: {seg_indices}} for combining 2 segments
+    uncombine_requested = pyqtSignal(str, int)  # (file_path, seg_index) to uncombine a segment
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -553,8 +562,34 @@ class CanvasView(QGraphicsView):
             self.split_selected_segment()
         elif event.key() == Qt.Key.Key_R:
             self.relabel_requested.emit()
+        elif event.key() == Qt.Key.Key_C:
+            self._request_combine()
+        elif event.key() == Qt.Key.Key_U:
+            self._request_uncombine()
         else:
             super().keyPressEvent(event)
+
+    def _request_combine(self) -> None:
+        """Emit combine_requested if exactly 2 segments are multi-selected."""
+        # Include active segment in multi-selection
+        if self._page_data and 0 <= self._active_segment_idx < len(self._page_data.segments):
+            fp = self._page_data.file_path
+            self._multi_selected.setdefault(fp, set()).add(self._active_segment_idx)
+        total = sum(len(s) for s in self._multi_selected.values())
+        if total == 2:
+            self.combine_requested.emit(dict(self._multi_selected))
+            self._multi_selected.clear()
+            self._active_segment_idx = -1
+            self.segment_selected.emit(-1)
+            self.viewport().update()
+
+    def _request_uncombine(self) -> None:
+        """Uncombine the active segment if it is part of a combined pair."""
+        if self._page_data and 0 <= self._active_segment_idx < len(self._page_data.segments):
+            seg = self._page_data.segments[self._active_segment_idx]
+            if seg.combined_id:
+                self.uncombine_requested.emit(self._page_data.file_path, self._active_segment_idx)
+                self.viewport().update()
 
     # ── painting overlay ─────────────────────────────────────────────────
 
@@ -598,16 +633,20 @@ class CanvasView(QGraphicsView):
         highlight = active or selected
         pts = [QPointF(self.mapFromScene(QPointF(x, y))) for x, y in seg.vertices]
 
+        fill = FILL_COLOR_SELECTED if highlight else FILL_COLOR
+        edge_c = EDGE_COLOR_SELECTED if highlight else EDGE_COLOR
+        lbl_bg = LABEL_BG
+
         # Fill
         path = QPainterPath()
         path.moveTo(pts[0])
         for p in pts[1:]:
             path.lineTo(p)
         path.closeSubpath()
-        painter.fillPath(path, QBrush(FILL_COLOR_SELECTED if highlight else FILL_COLOR))
+        painter.fillPath(path, QBrush(fill))
 
         # Edges
-        pen = QPen(EDGE_COLOR_SELECTED if highlight else EDGE_COLOR, 2)
+        pen = QPen(edge_c, 2)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.drawPath(path)
@@ -615,7 +654,7 @@ class CanvasView(QGraphicsView):
         # Vertices
         if active:
             for p in pts:
-                painter.setPen(QPen(EDGE_COLOR_SELECTED, 1.5))
+                painter.setPen(QPen(edge_c, 1.5))
                 painter.setBrush(QBrush(VERTEX_COLOR))
                 painter.drawEllipse(p, VERTEX_RADIUS, VERTEX_RADIUS)
 
@@ -630,7 +669,7 @@ class CanvasView(QGraphicsView):
         th = fm.height() + 4
         label_rect = QRectF(cx - tw / 2, cy - th / 2, tw, th)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(LABEL_BG))
+        painter.setBrush(QBrush(lbl_bg))
         painter.drawRoundedRect(label_rect, 3, 3)
         painter.setPen(QPen(LABEL_COLOR))
         painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, text)

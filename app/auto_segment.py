@@ -627,7 +627,15 @@ def relabel_page(
 
     page.segments.sort(key=_seg_sort_key)
 
-    # Reassign labels starting from offset
+    # Reassign labels:
+    #   - Normal segments and "top" combined segments get the next label in sequence
+    #   - "bottom" combined segments are skipped here (handled by caller)
     page._counter = 0
     for seg in page.segments:
-        seg.label = page.next_label(offset)
+        if seg.combined_role == "bottom":
+            continue  # bottom inherits from its top partner – handled externally
+        base = page.next_label(offset)
+        if seg.combined_role == "top":
+            seg.label = f"{base}_top"
+        else:
+            seg.label = base

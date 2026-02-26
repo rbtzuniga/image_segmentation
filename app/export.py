@@ -87,19 +87,88 @@ def save_segment_image(
     return filepath
 
 
+def _find_combined_pair(
+    pages: List[PageData],
+    combined_id: str,
+) -> tuple:
+    """Locate both halves of a combined pair across all pages.
+
+    Returns (top_seg, top_page_idx, bottom_seg, bottom_page_idx).
+    Any element may be ``None`` if the partner is missing.
+    """
+    top_seg = top_idx = bottom_seg = bottom_idx = None
+    for pi, page in enumerate(pages):
+        for seg in page.segments:
+            if seg.combined_id == combined_id:
+                if seg.combined_role == "top":
+                    top_seg, top_idx = seg, pi
+                elif seg.combined_role == "bottom":
+                    bottom_seg, bottom_idx = seg, pi
+    return top_seg, top_idx, bottom_seg, bottom_idx
+
+
+def _vstack_with_padding(top: np.ndarray, bottom: np.ndarray) -> np.ndarray:
+    """Vertically stack two images, padding the narrower one with white."""
+    h1, w1 = top.shape[:2]
+    h2, w2 = bottom.shape[:2]
+    max_w = max(w1, w2)
+    channels = top.shape[2] if top.ndim == 3 else 1
+
+    if w1 < max_w:
+        pad = np.ones((h1, max_w - w1, channels), dtype=top.dtype) * 255
+        top = np.hstack([top, pad])
+    if w2 < max_w:
+        pad = np.ones((h2, max_w - w2, channels), dtype=bottom.dtype) * 255
+        bottom = np.hstack([bottom, pad])
+    return np.vstack([top, bottom])
+
+
 def export_all(
     pages: List[PageData],
     output_folder: str,
     prefix: str = "segment",
     ext: str = "png",
 ) -> List[str]:
-    """Export every segment from every page. Returns list of saved file paths."""
+    """Export every segment from every page. Returns list of saved file paths.
+
+    Combined segment pairs are exported as a single vertically-concatenated
+    image using the top segment's page number and base label.
+    """
     saved: List[str] = []
+    exported_combined: set = set()  # combined_ids already exported
+
     for page_idx, page in enumerate(pages):
         page_num = page_idx + 1  # 1-based
         for seg in page.segments:
             if len(seg.vertices) != 4:
                 continue
+
+            if seg.combined_id:
+                if seg.combined_id in exported_combined:
+                    continue  # already exported this pair
+                exported_combined.add(seg.combined_id)
+
+                top_seg, top_pi, bottom_seg, bottom_pi = _find_combined_pair(
+                    pages, seg.combined_id,
+                )
+                if top_seg and bottom_seg and top_pi is not None and bottom_pi is not None:
+                    top_img = crop_quadrilateral(
+                        pages[top_pi].file_path, top_seg.vertices,
+                    )
+                    bottom_img = crop_quadrilateral(
+                        pages[bottom_pi].file_path, bottom_seg.vertices,
+                    )
+                    combined_img = _vstack_with_padding(top_img, bottom_img)
+                    base_label = top_seg.label.removesuffix("_top")
+                    combined_page_num = top_pi + 1
+                    path = save_segment_image(
+                        combined_img, output_folder, prefix,
+                        combined_page_num, base_label, ext,
+                    )
+                    saved.append(path)
+                continue
+
+            # Regular (non-combined) segment
             warped = crop_quadrilateral(page.file_path, seg.vertices)
             path = save_segment_image(warped, output_folder, prefix, page_num, seg.label, ext)
             saved.append(path)
