@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Optional
 
 from PyQt6.QtCore import Qt, QCoreApplication
@@ -13,6 +14,7 @@ from PyQt6.QtWidgets import (
     QStatusBar,
     QSplitter,
     QProgressDialog,
+    QFileDialog,
 )
 
 from app.auto_segment import (
@@ -77,6 +79,8 @@ class MainWindow(QMainWindow):
         self._thumb_panel.folder_loaded.connect(self._on_folder_loaded)
         self._thumb_panel.page_selected.connect(self._on_page_selected)
         self._thumb_panel.page_removed.connect(self._on_page_removed)
+        self._thumb_panel.save_segmentation_clicked.connect(self._on_save_segmentation)
+        self._thumb_panel.load_segmentation_clicked.connect(self._on_load_segmentation)
 
         # Settings → canvas / export
         self._settings.tool_changed.connect(self._canvas.set_tool)
@@ -184,6 +188,182 @@ class MainWindow(QMainWindow):
                 self._status.showMessage(
                     f"Removed page. {remaining} page{'s' if remaining != 1 else ''} remaining."
                 )
+
+    def _on_save_segmentation(self) -> None:
+        """Save current session to a .seg file."""
+        if not self._ordered_paths:
+            QMessageBox.warning(self, "No Data", "No pages loaded to save.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Segmentation",
+            "",
+            "Segmentation Files (*.seg);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        # Ensure .seg extension
+        if not file_path.lower().endswith(".seg"):
+            file_path += ".seg"
+
+        # Build data structure
+        data = {
+            "version": 1,
+            "n_columns": self._settings.n_columns,
+            "pages": []
+        }
+
+        for path in self._ordered_paths:
+            page = self._pages.get(path)
+            if not page:
+                continue
+
+            page_data = {
+                "file_path": page.file_path,
+                "segments": [],
+                "column_separators": list(page.column_separators) if page.column_separators else [],
+                "content_bounds": None,
+                "_counter": page._counter,
+            }
+
+            # Serialize content bounds
+            if page.content_bounds:
+                left, right = page.content_bounds
+                page_data["content_bounds"] = [list(left), list(right)]
+
+            # Serialize segments
+            for seg in page.segments:
+                seg_data = {
+                    "label": seg.label,
+                    "vertices": [list(v) for v in seg.vertices],
+                    "combined_id": seg.combined_id,
+                    "combined_role": seg.combined_role,
+                }
+                page_data["segments"].append(seg_data)
+
+            data["pages"].append(page_data)
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            self._status.showMessage(f"Saved segmentation to {file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save: {e}")
+
+    def _on_load_segmentation(self) -> None:
+        """Load a session from a .seg file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Segmentation",
+            "",
+            "Segmentation Files (*.seg);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", f"Failed to load: {e}")
+            return
+
+        # Validate version
+        version = data.get("version", 0)
+        if version != 1:
+            QMessageBox.warning(
+                self, "Version Mismatch",
+                f"Unsupported file version: {version}. Expected version 1."
+            )
+            return
+
+        pages_data = data.get("pages", [])
+        if not pages_data:
+            QMessageBox.warning(self, "Empty File", "No pages found in the file.")
+            return
+
+        # Collect file paths and check which exist
+        file_paths = []
+        missing = []
+        for pd in pages_data:
+            fp = pd.get("file_path", "")
+            if fp:
+                from pathlib import Path
+                if Path(fp).is_file():
+                    file_paths.append(fp)
+                else:
+                    missing.append(fp)
+
+        if missing:
+            QMessageBox.warning(
+                self, "Missing Files",
+                f"{len(missing)} image(s) not found:\n" + "\n".join(missing[:5]) +
+                ("\n..." if len(missing) > 5 else "")
+            )
+
+        if not file_paths:
+            QMessageBox.critical(self, "No Valid Files", "No valid image files found.")
+            return
+
+        # Load thumbnails
+        self._thumb_panel.load_files(file_paths)
+
+        # Restore pages data
+        self._ordered_paths = file_paths
+        self._pages.clear()
+
+        for pd in pages_data:
+            fp = pd.get("file_path", "")
+            if fp not in file_paths:
+                continue
+
+            page = PageData(file_path=fp)
+            page._counter = pd.get("_counter", 0)
+
+            # Restore column separators
+            seps = pd.get("column_separators", [])
+            page.column_separators = [(s[0], s[1]) for s in seps if len(s) >= 2]
+
+            # Restore content bounds
+            cb = pd.get("content_bounds")
+            if cb and len(cb) == 2:
+                left, right = cb
+                if len(left) >= 2 and len(right) >= 2:
+                    page.content_bounds = ((left[0], left[1]), (right[0], right[1]))
+
+            # Restore segments
+            for seg_d in pd.get("segments", []):
+                verts = seg_d.get("vertices", [])
+                if len(verts) != 4:
+                    continue
+                seg = Segment(
+                    label=seg_d.get("label", ""),
+                    vertices=[(v[0], v[1]) for v in verts],
+                    combined_id=seg_d.get("combined_id"),
+                    combined_role=seg_d.get("combined_role"),
+                )
+                page.segments.append(seg)
+
+            self._pages[fp] = page
+
+        # Restore column count setting
+        n_cols = data.get("n_columns", 1)
+        self._settings.n_columns = n_cols
+
+        # Select first page
+        if file_paths:
+            self._thumb_panel.select_page(0)
+            self._current_page_idx = 0
+            self._canvas.load_page(self._pages[file_paths[0]])
+
+        total = len(file_paths)
+        total_segs = sum(len(p.segments) for p in self._pages.values())
+        self._status.showMessage(
+            f"Loaded {total} page{'s' if total != 1 else ''} with "
+            f"{total_segs} segment{'s' if total_segs != 1 else ''} from {file_path}"
+        )
 
     def _on_segment_selected(self, seg_idx: int) -> None:
         page = self._canvas.current_page_data()
