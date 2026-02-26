@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import List
@@ -40,6 +39,10 @@ class ThumbnailPanel(QWidget):
     page_removed = pyqtSignal(int)
     # Emitted when a new input folder is loaded.  Carries the list of file paths.
     folder_loaded = pyqtSignal(list)
+    # Emitted when the user clicks Save Segmentation
+    save_segmentation_clicked = pyqtSignal()
+    # Emitted when the user clicks Load Segmentation
+    load_segmentation_clicked = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -55,6 +58,15 @@ class ThumbnailPanel(QWidget):
         self._btn_open = QPushButton("Select Input Folder…")
         self._btn_open.clicked.connect(self._on_open_folder)
         layout.addWidget(self._btn_open)
+
+        # Save/Load segmentation buttons
+        self._btn_save_seg = QPushButton("Save Segmentation…")
+        self._btn_save_seg.clicked.connect(self.save_segmentation_clicked.emit)
+        layout.addWidget(self._btn_save_seg)
+
+        self._btn_load_seg = QPushButton("Load Segmentation…")
+        self._btn_load_seg.clicked.connect(self.load_segmentation_clicked.emit)
+        layout.addWidget(self._btn_load_seg)
 
         self._label = QLabel("No folder loaded")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -114,6 +126,41 @@ class ThumbnailPanel(QWidget):
 
         if count:
             self._list.setCurrentRow(0)
+
+    def load_files(self, file_paths: List[str]) -> None:
+        """Load specific image files and populate the list.
+        
+        Used when restoring a session from a .seg file.
+        """
+        self._list.clear()
+        self._file_paths.clear()
+
+        for path_str in file_paths:
+            path = Path(path_str)
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+
+            self._file_paths.append(path_str)
+
+            pixmap = QPixmap(path_str)
+            if pixmap.isNull():
+                continue
+            thumb = pixmap.scaled(
+                THUMB_SIZE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+            item = QListWidgetItem(QIcon(thumb), path.name)
+            item.setSizeHint(QSize(THUMB_SIZE.width() + 10, THUMB_SIZE.height() + 24))
+            item.setToolTip(path_str)
+            self._list.addItem(item)
+
+        count = len(self._file_paths)
+        self._label.setText(f"{count} page{'s' if count != 1 else ''} loaded")
+        # Note: we don't emit folder_loaded here since main_window handles restoration
 
     def select_page(self, index: int) -> None:
         """Programmatically select a page by index."""

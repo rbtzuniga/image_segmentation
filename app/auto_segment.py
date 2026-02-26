@@ -145,6 +145,282 @@ def _vertical_gap(a: BBox, b: BBox) -> float:
     return b_top - a_bot
 
 
+# ── Binarization ─────────────────────────────────────────────────────────
+
+def _detect_edge_shadow(img: np.ndarray, side: str = "left") -> int:
+    """Detect vertical shadow band at image edge.
+    
+    Returns the width of the shadow band to mask out.
+    """
+    h, w = img.shape
+    margin = min(w // 4, 200)  # Check up to 25% of width or 200px
+    
+    if side == "left":
+        strip = img[:, :margin]
+    else:
+        strip = img[:, -margin:]
+    
+    # Calculate column-wise mean intensity
+    col_means = np.mean(strip, axis=0)
+    
+    # Find where the shadow ends (intensity jumps up significantly)
+    overall_mean = np.mean(img)
+    threshold = overall_mean * 0.85  # Shadow is darker than 85% of overall
+    
+    shadow_width = 0
+    if side == "left":
+        for i, val in enumerate(col_means):
+            if val < threshold:
+                shadow_width = i + 1
+            else:
+                # Allow small gaps in shadow detection
+                if i - shadow_width > 10:
+                    break
+    else:
+        for i in range(len(col_means) - 1, -1, -1):
+            if col_means[i] < threshold:
+                shadow_width = margin - i
+            else:
+                if (margin - i) - shadow_width > 10:
+                    break
+    
+    # Only return if shadow is substantial (> 2% of width)
+    if shadow_width > w * 0.02:
+        return shadow_width
+    return 0
+
+
+def _apply_clahe(img: np.ndarray) -> np.ndarray:
+    """Apply CLAHE for contrast enhancement."""
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return clahe.apply(img)
+
+
+def _filter_low_contrast_regions(binary: np.ndarray, gray: np.ndarray) -> np.ndarray:
+    """Remove foreground pixels in low-contrast (shadow) regions.
+    
+    Real text has high local contrast; shadows have uniform low intensity.
+    """
+    h, w = gray.shape
+    
+    # Calculate local variance using a window
+    block_size = max(min(h, w) // 30, 15) | 1
+    
+    # Use integral images for fast local variance calculation
+    gray_f = gray.astype(np.float32)
+    mean = cv2.blur(gray_f, (block_size, block_size))
+    sqr_mean = cv2.blur(gray_f ** 2, (block_size, block_size))
+    variance = sqr_mean - mean ** 2
+    variance = np.maximum(variance, 0)  # Clamp negative values due to floating point
+    
+    # Create mask where variance is too low (shadow regions)
+    # Threshold based on median variance of foreground pixels
+    fg_mask = binary > 0
+    if np.sum(fg_mask) > 100:
+        fg_variance = variance[fg_mask]
+        median_var = np.median(fg_variance)
+        # Remove pixels where local variance is < 10% of median
+        # These are likely shadow artifacts, not real text
+        var_thresh = max(median_var * 0.1, 50)  # Minimum threshold
+        low_contrast_mask = variance < var_thresh
+        
+        # Only apply to areas that are also relatively dark in the original
+        # (text should be dark, but in high-contrast areas)
+        dark_mask = gray < np.mean(gray)
+        shadow_mask = low_contrast_mask & dark_mask
+        
+        # Remove shadow artifacts from binary
+        result = binary.copy()
+        result[shadow_mask] = 0
+        return result
+    
+    return binary
+
+
+def _simple_binarize(img: np.ndarray) -> Tuple[np.ndarray, bool]:
+    """Fast binarization using Otsu. Returns (binary, success).
+    
+    Success is True if the foreground ratio is reasonable.
+    """
+    h, w = img.shape
+    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    fg_ratio = np.sum(binary > 0) / (h * w)
+    return binary, 0.005 <= fg_ratio <= 0.4
+
+
+def _robust_binarize_full(img: np.ndarray) -> np.ndarray:
+    """Full robust binarization for difficult images with shading."""
+    h, w = img.shape
+
+    # Detect and mask edge shadows
+    left_shadow = _detect_edge_shadow(img, "left")
+    right_shadow = _detect_edge_shadow(img, "right")
+    
+    # Create working copy, fill shadow areas with local background estimate
+    working = img.copy()
+    if left_shadow > 0:
+        # Estimate background from just beyond the shadow
+        bg_sample_start = min(left_shadow + 10, w - 1)
+        bg_sample_end = min(left_shadow + 50, w)
+        if bg_sample_end > bg_sample_start:
+            local_bg = int(np.median(img[:, bg_sample_start:bg_sample_end]))
+            working[:, :left_shadow] = local_bg
+    if right_shadow > 0:
+        bg_sample_end = max(w - right_shadow - 10, 0)
+        bg_sample_start = max(w - right_shadow - 50, 0)
+        if bg_sample_end > bg_sample_start:
+            local_bg = int(np.median(img[:, bg_sample_start:bg_sample_end]))
+            working[:, -right_shadow:] = local_bg
+
+    # Apply CLAHE for contrast enhancement (helps with gray backgrounds)
+    enhanced = _apply_clahe(working)
+    
+    # Try Otsu on CLAHE-enhanced image first
+    _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    fg_ratio = np.sum(binary > 0) / (h * w)
+    
+    if 0.005 <= fg_ratio <= 0.4:
+        # Mask out shadow regions in result
+        if left_shadow > 0:
+            binary[:, :left_shadow] = 0
+        if right_shadow > 0:
+            binary[:, -right_shadow:] = 0
+        # Filter low-contrast shadow artifacts
+        binary = _filter_low_contrast_regions(binary, img)
+        return binary
+
+    # Background normalization using Gaussian blur
+    blur_size = max(w // 10, 51) | 1
+    background = cv2.GaussianBlur(working, (blur_size, blur_size), 0)
+    
+    # Normalize: divide image by background
+    normalized = cv2.divide(working, background, scale=255)
+
+    # Apply CLAHE to normalized image as well
+    normalized = _apply_clahe(normalized)
+
+    # Try Otsu on normalized
+    _, binary = cv2.threshold(normalized, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    fg_ratio = np.sum(binary > 0) / (h * w)
+    
+    if 0.005 <= fg_ratio <= 0.4:
+        if left_shadow > 0:
+            binary[:, :left_shadow] = 0
+        if right_shadow > 0:
+            binary[:, -right_shadow:] = 0
+        # Filter low-contrast shadow artifacts
+        binary = _filter_low_contrast_regions(binary, img)
+        return binary
+
+    # Fallback to adaptive thresholding with smaller block size
+    block_size = max(h // 60, 21) | 1
+    adaptive = cv2.adaptiveThreshold(
+        normalized, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        block_size, 6
+    )
+    
+    # Clean up noise with morphological opening
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    adaptive = cv2.morphologyEx(adaptive, cv2.MORPH_OPEN, kernel)
+    
+    # Mask out shadow regions
+    if left_shadow > 0:
+        adaptive[:, :left_shadow] = 0
+    if right_shadow > 0:
+        adaptive[:, -right_shadow:] = 0
+    
+    # Filter low-contrast shadow artifacts
+    adaptive = _filter_low_contrast_regions(adaptive, img)
+    
+    return adaptive
+
+
+def _robust_binarize(img: np.ndarray) -> np.ndarray:
+    """Smart binarization: tries fast method first, falls back to robust."""
+    # Check for edge shadows first - if present, use robust path
+    left_shadow = _detect_edge_shadow(img, "left")
+    right_shadow = _detect_edge_shadow(img, "right")
+    if left_shadow > 0 or right_shadow > 0:
+        return _robust_binarize_full(img)
+    
+    binary, success = _simple_binarize(img)
+    if success:
+        return binary
+    return _robust_binarize_full(img)
+
+
+# ── Image caching ────────────────────────────────────────────────────────
+
+# Cache for binarized images (avoids repeated processing of the same image)
+_binarize_cache: dict = {}
+_CACHE_MAX_SIZE = 5
+
+
+def _get_cached_binary(image_path: str) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    """Get cached (grayscale, binary) images, or load and cache them.
+    
+    Returns (grayscale, binary, height, width).
+    """
+    if image_path in _binarize_cache:
+        return _binarize_cache[image_path]
+    
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None, None, 0, 0
+    
+    h, w = img.shape
+    binary = _robust_binarize(img)
+    
+    # Maintain cache size
+    if len(_binarize_cache) >= _CACHE_MAX_SIZE:
+        # Remove oldest entry
+        oldest = next(iter(_binarize_cache))
+        del _binarize_cache[oldest]
+    
+    _binarize_cache[image_path] = (img, binary, h, w)
+    return img, binary, h, w
+
+
+def clear_binarize_cache():
+    """Clear the binarization cache."""
+    _binarize_cache.clear()
+
+
+# Target width for fast estimation (column/content bounds don't need full resolution)
+_ESTIMATION_WIDTH = 800
+
+
+def _get_fast_binary(image_path: str) -> Tuple[np.ndarray, int, int, float]:
+    """Get downscaled binary for fast estimation.
+    
+    Returns (binary, orig_height, orig_width, scale_factor).
+    """
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None, 0, 0, 1.0
+    
+    h, w = img.shape
+    
+    # Downscale if image is large
+    if w > _ESTIMATION_WIDTH:
+        scale = _ESTIMATION_WIDTH / w
+        new_w = _ESTIMATION_WIDTH
+        new_h = int(h * scale)
+        img_small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    else:
+        img_small = img
+        scale = 1.0
+    
+    # Use simple Otsu first (very fast on small images)
+    binary, success = _simple_binarize(img_small)
+    if not success:
+        binary = _robust_binarize_full(img_small)
+    
+    return binary, h, w, scale
+
+
 # ── Column estimation ────────────────────────────────────────────────────
 
 def estimate_columns(image_path: str) -> int:
@@ -156,13 +432,12 @@ def estimate_columns(image_path: str) -> int:
 
     Returns 1 if estimation fails or the image has a single column.
     """
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
+    # Use fast downscaled binary for estimation
+    binary, orig_h, orig_w, scale = _get_fast_binary(image_path)
+    if binary is None:
         return 1
 
-    h, w = img.shape
-    # Binarise – invert so text = white
-    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    h, w = binary.shape
 
     # Vertical projection: sum each column of pixels
     col_sums = np.sum(binary, axis=0) / 255  # number of text pixels per column
@@ -207,23 +482,28 @@ def estimate_columns(image_path: str) -> int:
     return max(n_columns, 1)
 
 
-def estimate_column_separators(image_path: str, n_columns: int) -> List[Tuple[float, float]]:
+def estimate_column_separators(
+    image_path: str,
+    n_columns: int,
+    content_bounds: Tuple[Tuple[float, float], Tuple[float, float]] | None = None,
+) -> List[Tuple[float, float]]:
     """Estimate the x-positions of column separators.
 
     Uses a vertical projection profile to find the deepest gutters
     between content bands.  Returns a list of (n_columns - 1) pairs
     of (x_top, x_bottom) — initially vertical (same x for both endpoints).
-    Falls back to evenly-spaced positions if detection fails.
+    Falls back to evenly-spaced positions within content bounds if detection
+    has low confidence.
     """
     if n_columns <= 1:
         return []
 
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
+    # Use fast downscaled binary for estimation
+    binary, orig_h, orig_w, scale = _get_fast_binary(image_path)
+    if binary is None:
         return []
 
-    h, w = img.shape
-    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    h, w = binary.shape
 
     col_sums = np.sum(binary, axis=0) / 255
     kernel_size = max(w // 80, 5) | 1
@@ -231,51 +511,97 @@ def estimate_column_separators(image_path: str, n_columns: int) -> List[Tuple[fl
 
     n_seps = n_columns - 1
 
+    # Determine content area bounds (scale to match downscaled image)
+    if content_bounds:
+        left_bound, right_bound = content_bounds
+        # Use average of top/bottom for vertical lines, scaled
+        left_x = (left_bound[0] + left_bound[1]) / 2.0 * scale
+        right_x = (right_bound[0] + right_bound[1]) / 2.0 * scale
+    else:
+        # Fallback: use 5% margins
+        left_x = w * 0.05
+        right_x = w * 0.95
+
+    content_width = right_x - left_x
+
+    def _equidistant_separators() -> List[Tuple[float, float]]:
+        """Return separators equally spaced within content bounds (in original resolution)."""
+        # Calculate in original resolution
+        orig_left = left_x / scale if scale > 0 else left_x
+        orig_width = content_width / scale if scale > 0 else content_width
+        return [
+            (orig_left + orig_width * (i + 1) / n_columns,
+             orig_left + orig_width * (i + 1) / n_columns)
+            for i in range(n_seps)
+        ]
+
     # Find gutter regions (low ink density)
     mean_val = np.mean(smoothed)
     if mean_val < 1:
-        # Fallback: equal spacing
-        return [(w * (i + 1) / n_columns, w * (i + 1) / n_columns)
-                for i in range(n_seps)]
+        return _equidistant_separators()
 
     gutter_thresh = mean_val * 0.25
-    margin = int(w * 0.05)
+    margin = int(left_x)  # Use content bound as margin
+    right_margin = int(w - right_x)
 
     # Build a "gutter score" — lower ink = deeper gutter
-    # We look for the n_seps deepest gutter valleys in the interior
-    # Widen the search window so we pick the centre of each gutter
     gutter_window = max(w // 40, 10)
-    # Create a running-minimum-ink array (averaged over a window)
     gutter_score = np.convolve(
         smoothed, np.ones(gutter_window) / gutter_window, mode="same"
     )
 
-    # Mask out margins
-    gutter_score[:margin] = np.inf
-    gutter_score[-margin:] = np.inf
+    # Mask out areas outside content bounds
+    gutter_score[:max(margin, 1)] = np.inf
+    gutter_score[-max(right_margin, 1):] = np.inf
 
-    # Find the n_seps best (lowest-score) gutter positions,
-    # ensuring they are well-separated from each other.
+    # Find the n_seps best (lowest-score) gutter positions
     separators: List[float] = []
-    min_sep_distance = w // (n_columns * 2)  # at least half a column width apart
+    min_sep_distance = int(content_width // (n_columns * 2))
 
     for _ in range(n_seps):
         idx = int(np.argmin(gutter_score))
         if gutter_score[idx] == np.inf:
             break
         separators.append(float(idx))
-        # Suppress nearby positions
         lo = max(0, idx - min_sep_distance)
         hi = min(len(gutter_score), idx + min_sep_distance)
         gutter_score[lo:hi] = np.inf
 
-    # If we didn't find enough, fill with equal spacing
-    if len(separators) < n_seps:
-        separators = [w * (i + 1) / n_columns for i in range(n_seps)]
+    # Confidence check: verify separators are reasonable
+    if len(separators) == n_seps:
+        separators.sort()
+        expected_spacing = content_width / n_columns
+        low_confidence = False
 
-    separators.sort()
-    # Return as (x_top, x_bottom) pairs — initially vertical
-    return [(x, x) for x in separators]
+        for i, sep_x in enumerate(separators):
+            # Check if separator is within content bounds
+            if sep_x < left_x or sep_x > right_x:
+                low_confidence = True
+                break
+            # Check if separator is roughly where expected (within 40% tolerance)
+            expected_pos = left_x + expected_spacing * (i + 1)
+            if abs(sep_x - expected_pos) > expected_spacing * 0.4:
+                low_confidence = True
+                break
+
+        # Check spacing between separators is roughly equal
+        if not low_confidence and n_seps > 1:
+            gaps = [separators[i+1] - separators[i] for i in range(n_seps - 1)]
+            avg_gap = sum(gaps) / len(gaps)
+            for gap in gaps:
+                if abs(gap - avg_gap) > avg_gap * 0.5:
+                    low_confidence = True
+                    break
+
+        if low_confidence:
+            return _equidistant_separators()
+
+        # Scale back to original resolution
+        inv_scale = 1.0 / scale if scale > 0 else 1.0
+        return [(x * inv_scale, x * inv_scale) for x in separators]
+
+    # Didn't find enough separators — use equidistant
+    return _equidistant_separators()
 
 
 def estimate_columns_sample(file_paths: List[str], max_sample: int = 5) -> int:
@@ -290,6 +616,53 @@ def estimate_columns_sample(file_paths: List[str], max_sample: int = 5) -> int:
     # Return the mode (most common value)
     from collections import Counter
     return Counter(counts).most_common(1)[0][0]
+
+
+def estimate_content_bounds(image_path: str) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Estimate the left and right content boundaries of a scanned document.
+
+    Uses vertical projection profile to find where the content starts and ends.
+    Returns ((left_top, left_bottom), (right_top, right_bottom)) — initially vertical.
+    """
+    # Use fast downscaled binary for estimation
+    binary, orig_h, orig_w, scale = _get_fast_binary(image_path)
+    if binary is None:
+        return ((0.0, 0.0), (100.0, 100.0))
+
+    h, w = binary.shape
+
+    col_sums = np.sum(binary, axis=0) / 255
+    kernel_size = max(w // 80, 5) | 1
+    smoothed = np.convolve(col_sums, np.ones(kernel_size) / kernel_size, mode="same")
+
+    mean_val = np.mean(smoothed)
+    if mean_val < 1:
+        # No content detected, return small margins (in original resolution)
+        return ((orig_w * 0.05, orig_w * 0.05), (orig_w * 0.95, orig_w * 0.95))
+
+    # Threshold for detecting content
+    content_thresh = mean_val * 0.1
+
+    # Find left boundary: first column with significant content
+    left_x = 0
+    for i in range(w):
+        if smoothed[i] > content_thresh:
+            left_x = max(0, i - 5)  # Small padding
+            break
+
+    # Find right boundary: last column with significant content
+    right_x = w
+    for i in range(w - 1, -1, -1):
+        if smoothed[i] > content_thresh:
+            right_x = min(w, i + 5)  # Small padding
+            break
+
+    # Scale back to original resolution
+    inv_scale = 1.0 / scale if scale > 0 else 1.0
+    left_x_orig = left_x * inv_scale
+    right_x_orig = right_x * inv_scale
+
+    return ((float(left_x_orig), float(left_x_orig)), (float(right_x_orig), float(right_x_orig)))
 
 
 def _sep_x_at_y(
@@ -375,6 +748,7 @@ def detect_paragraphs(
     horizontal_reach: float = 1.0,
     n_columns: int = 1,
     separators: List[float] | None = None,
+    content_bounds: Tuple[Tuple[float, float], Tuple[float, float]] | None = None,
 ) -> List[BBox]:
     """Detect paragraph-like text blocks in a scanned document image.
 
@@ -393,20 +767,18 @@ def detect_paragraphs(
         Explicit x-positions of column separator lines.  When provided,
         boxes that span across a separator are never merged, and the
         separator positions are used for column-aware sorting.
+    content_bounds : tuple, optional
+        ((left_top, left_bottom), (right_top, right_bottom)) content area bounds.
+        Boxes that fall mostly outside these bounds will be filtered out.
     """
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
+    _, binary, h, w = _get_cached_binary(image_path)
+    if binary is None:
         return []
 
-    h, w = img.shape
-
-    # 1. Binarise (Otsu) – invert so text = white
-    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    # 2. Estimate line height and inter-line gap
+    # 1. Estimate line height and inter-line gap (binarization already done via cache)
     line_h, line_gap = _estimate_line_height(binary)
 
-    # 3. Light horizontal dilation to merge characters into words/short phrases
+    # 2. Light horizontal dilation to merge characters into words/short phrases
     #    Use half the line height — enough to connect characters within a word
     #    but NOT enough to bridge column gutters.
     #    When column count is known, cap the kernel to stay within a single column.
@@ -417,7 +789,7 @@ def detect_paragraphs(
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kern_w, 1))
     word_mask = cv2.dilate(binary, h_kernel, iterations=1)
 
-    # 4. Find word-level connected components
+    # 3. Find word-level connected components
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(word_mask, connectivity=8)
 
     # Collect word boxes (skip background label 0)
@@ -438,7 +810,7 @@ def detect_paragraphs(
     if not word_boxes:
         return []
 
-    # 5. Cluster word-boxes into paragraph blocks via Union-Find.
+    # 4. Cluster word-boxes into paragraph blocks via Union-Find.
     #    Two boxes belong to the same paragraph if:
     #    - They overlap horizontally by ≥ 30% (or horizontal gap is small)
     #    - Their vertical gap is small (within normal line spacing)
@@ -509,7 +881,7 @@ def detect_paragraphs(
             elif v_gap <= 0 and h_gap <= line_h * 1.5:
                 uf.union(i, j)
 
-    # 6. Build merged bounding boxes for each cluster
+    # 5. Build merged bounding boxes for each cluster
     clusters: dict[int, List[int]] = defaultdict(list)
     for i in range(n):
         clusters[uf.find(i)].append(i)
@@ -538,6 +910,18 @@ def detect_paragraphs(
         if bw * bh > w * h * 0.8:
             continue  # skip near-full-page
 
+        # Filter by content bounds if provided
+        if content_bounds:
+            left_bound, right_bound = content_bounds
+            box_cy = by + bh / 2.0
+            # Interpolate left and right bounds at the box's vertical center
+            left_x = left_bound[0] + (left_bound[1] - left_bound[0]) * (box_cy / h) if h > 0 else left_bound[0]
+            right_x = right_bound[0] + (right_bound[1] - right_bound[0]) * (box_cy / h) if h > 0 else right_bound[0]
+            box_cx = bx + bw / 2.0
+            # Skip if the box center is outside the content area
+            if box_cx < left_x or box_cx > right_x:
+                continue
+
         # Small padding
         pad = 3
         bx = max(0, bx - pad)
@@ -560,6 +944,7 @@ def auto_segment_page(
     horizontal_reach: float = 1.0,
     n_columns: int = 1,
     separators: List[Tuple[float, float]] | None = None,
+    content_bounds: Tuple[Tuple[float, float], Tuple[float, float]] | None = None,
 ) -> int:
     """Run auto-detection on a single page and add segments.
 
@@ -577,6 +962,7 @@ def auto_segment_page(
         horizontal_reach=horizontal_reach,
         n_columns=n_columns,
         separators=separators,
+        content_bounds=content_bounds,
     )
     added = 0
     for x, y, bw, bh in boxes:

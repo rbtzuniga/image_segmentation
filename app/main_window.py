@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QCoreApplication
 from PyQt6.QtWidgets import (
     QMainWindow,
     QHBoxLayout,
@@ -12,17 +13,20 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QStatusBar,
     QSplitter,
+    QProgressDialog,
+    QFileDialog,
 )
 
 from app.auto_segment import (
     auto_segment_page,
     estimate_columns_sample,
     estimate_column_separators,
+    estimate_content_bounds,
     relabel_page,
 )
 from app.canvas import CanvasView
 from app.export import export_all
-from app.segment import PageData
+from app.segment import PageData, Segment
 from app.settings_panel import SettingsPanel
 from app.thumbnail_panel import ThumbnailPanel
 
@@ -75,6 +79,8 @@ class MainWindow(QMainWindow):
         self._thumb_panel.folder_loaded.connect(self._on_folder_loaded)
         self._thumb_panel.page_selected.connect(self._on_page_selected)
         self._thumb_panel.page_removed.connect(self._on_page_removed)
+        self._thumb_panel.save_segmentation_clicked.connect(self._on_save_segmentation)
+        self._thumb_panel.load_segmentation_clicked.connect(self._on_load_segmentation)
 
         # Settings → canvas / export
         self._settings.tool_changed.connect(self._canvas.set_tool)
@@ -83,6 +89,7 @@ class MainWindow(QMainWindow):
         self._settings.auto_segment_page_clicked.connect(self._on_auto_segment_page)
         self._settings.auto_segment_all_clicked.connect(self._on_auto_segment_all)
         self._settings.relabel_page_clicked.connect(self._on_relabel_page)
+        self._settings.add_segment_grid_clicked.connect(self._on_add_segment_grid)
         self._settings.delete_segment_clicked.connect(self._canvas.delete_selected_segment)
         self._settings.split_segment_clicked.connect(self._canvas.split_selected_segment)
         self._settings.combine_clicked.connect(self._canvas._request_combine)
@@ -115,18 +122,40 @@ class MainWindow(QMainWindow):
             self._pages[fp] = PageData(file_path=fp)
         total = len(file_paths)
 
-        # Estimate column count from a sample of pages
-        if file_paths:
-            est = estimate_columns_sample(file_paths)
-            self._settings.n_columns = est
-            # Estimate separator positions for every page
-            self._estimate_all_separators(est)
-            self._status.showMessage(
-                f"Loaded {total} page{'s' if total != 1 else ''} "
-                f"(estimated {est} column{'s' if est != 1 else ''})."
-            )
-        else:
+        if not file_paths:
             self._status.showMessage(f"Loaded {total} page{'s' if total != 1 else ''}.")
+            return
+
+        # Show progress dialog for processing
+        progress = QProgressDialog(
+            "Processing pages...", "Cancel", 0, total + 1, self
+        )
+        progress.setWindowTitle("Loading")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)  # Show after 300ms
+        progress.setValue(0)
+        QCoreApplication.processEvents()
+
+        # Estimate column count from a sample of pages
+        progress.setLabelText("Estimating column layout...")
+        est = estimate_columns_sample(file_paths)
+        self._settings.n_columns = est
+        progress.setValue(1)
+        QCoreApplication.processEvents()
+
+        if progress.wasCanceled():
+            return
+
+        # Estimate separator positions for every page with progress
+        self._estimate_all_separators_with_progress(est, progress)
+
+        progress.setValue(total + 1)
+        progress.close()
+
+        self._status.showMessage(
+            f"Loaded {total} page{'s' if total != 1 else ''} "
+            f"(estimated {est} column{'s' if est != 1 else ''})."
+        )
 
     def _on_page_selected(self, index: int) -> None:
         if 0 <= index < len(self._ordered_paths):
@@ -159,6 +188,182 @@ class MainWindow(QMainWindow):
                 self._status.showMessage(
                     f"Removed page. {remaining} page{'s' if remaining != 1 else ''} remaining."
                 )
+
+    def _on_save_segmentation(self) -> None:
+        """Save current session to a .seg file."""
+        if not self._ordered_paths:
+            QMessageBox.warning(self, "No Data", "No pages loaded to save.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Segmentation",
+            "",
+            "Segmentation Files (*.seg);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        # Ensure .seg extension
+        if not file_path.lower().endswith(".seg"):
+            file_path += ".seg"
+
+        # Build data structure
+        data = {
+            "version": 1,
+            "n_columns": self._settings.n_columns,
+            "pages": []
+        }
+
+        for path in self._ordered_paths:
+            page = self._pages.get(path)
+            if not page:
+                continue
+
+            page_data = {
+                "file_path": page.file_path,
+                "segments": [],
+                "column_separators": list(page.column_separators) if page.column_separators else [],
+                "content_bounds": None,
+                "_counter": page._counter,
+            }
+
+            # Serialize content bounds
+            if page.content_bounds:
+                left, right = page.content_bounds
+                page_data["content_bounds"] = [list(left), list(right)]
+
+            # Serialize segments
+            for seg in page.segments:
+                seg_data = {
+                    "label": seg.label,
+                    "vertices": [list(v) for v in seg.vertices],
+                    "combined_id": seg.combined_id,
+                    "combined_role": seg.combined_role,
+                }
+                page_data["segments"].append(seg_data)
+
+            data["pages"].append(page_data)
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            self._status.showMessage(f"Saved segmentation to {file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save: {e}")
+
+    def _on_load_segmentation(self) -> None:
+        """Load a session from a .seg file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Segmentation",
+            "",
+            "Segmentation Files (*.seg);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", f"Failed to load: {e}")
+            return
+
+        # Validate version
+        version = data.get("version", 0)
+        if version != 1:
+            QMessageBox.warning(
+                self, "Version Mismatch",
+                f"Unsupported file version: {version}. Expected version 1."
+            )
+            return
+
+        pages_data = data.get("pages", [])
+        if not pages_data:
+            QMessageBox.warning(self, "Empty File", "No pages found in the file.")
+            return
+
+        # Collect file paths and check which exist
+        file_paths = []
+        missing = []
+        for pd in pages_data:
+            fp = pd.get("file_path", "")
+            if fp:
+                from pathlib import Path
+                if Path(fp).is_file():
+                    file_paths.append(fp)
+                else:
+                    missing.append(fp)
+
+        if missing:
+            QMessageBox.warning(
+                self, "Missing Files",
+                f"{len(missing)} image(s) not found:\n" + "\n".join(missing[:5]) +
+                ("\n..." if len(missing) > 5 else "")
+            )
+
+        if not file_paths:
+            QMessageBox.critical(self, "No Valid Files", "No valid image files found.")
+            return
+
+        # Load thumbnails
+        self._thumb_panel.load_files(file_paths)
+
+        # Restore pages data
+        self._ordered_paths = file_paths
+        self._pages.clear()
+
+        for pd in pages_data:
+            fp = pd.get("file_path", "")
+            if fp not in file_paths:
+                continue
+
+            page = PageData(file_path=fp)
+            page._counter = pd.get("_counter", 0)
+
+            # Restore column separators
+            seps = pd.get("column_separators", [])
+            page.column_separators = [(s[0], s[1]) for s in seps if len(s) >= 2]
+
+            # Restore content bounds
+            cb = pd.get("content_bounds")
+            if cb and len(cb) == 2:
+                left, right = cb
+                if len(left) >= 2 and len(right) >= 2:
+                    page.content_bounds = ((left[0], left[1]), (right[0], right[1]))
+
+            # Restore segments
+            for seg_d in pd.get("segments", []):
+                verts = seg_d.get("vertices", [])
+                if len(verts) != 4:
+                    continue
+                seg = Segment(
+                    label=seg_d.get("label", ""),
+                    vertices=[(v[0], v[1]) for v in verts],
+                    combined_id=seg_d.get("combined_id"),
+                    combined_role=seg_d.get("combined_role"),
+                )
+                page.segments.append(seg)
+
+            self._pages[fp] = page
+
+        # Restore column count setting
+        n_cols = data.get("n_columns", 1)
+        self._settings.n_columns = n_cols
+
+        # Select first page
+        if file_paths:
+            self._thumb_panel.select_page(0)
+            self._current_page_idx = 0
+            self._canvas.load_page(self._pages[file_paths[0]])
+
+        total = len(file_paths)
+        total_segs = sum(len(p.segments) for p in self._pages.values())
+        self._status.showMessage(
+            f"Loaded {total} page{'s' if total != 1 else ''} with "
+            f"{total_segs} segment{'s' if total_segs != 1 else ''} from {file_path}"
+        )
 
     def _on_segment_selected(self, seg_idx: int) -> None:
         page = self._canvas.current_page_data()
@@ -201,14 +406,55 @@ class MainWindow(QMainWindow):
         return []
 
     def _estimate_all_separators(self, n_columns: int) -> None:
-        """Estimate separator positions for all loaded pages."""
+        """Estimate separator positions and content bounds for all loaded pages."""
         for path in self._ordered_paths:
             page = self._pages[path]
-            page.column_separators = estimate_column_separators(path, n_columns)
+            # Estimate content bounds first
+            page.content_bounds = estimate_content_bounds(path)
+            # Then estimate separators using content bounds for better placement
+            page.column_separators = estimate_column_separators(
+                path, n_columns, content_bounds=page.content_bounds
+            )
+
+    def _estimate_all_separators_with_progress(
+        self, n_columns: int, progress: QProgressDialog
+    ) -> None:
+        """Estimate separator positions with progress updates."""
+        for i, path in enumerate(self._ordered_paths):
+            if progress.wasCanceled():
+                break
+            progress.setLabelText(f"Processing page {i + 1} of {len(self._ordered_paths)}...")
+            page = self._pages[path]
+            page.content_bounds = estimate_content_bounds(path)
+            page.column_separators = estimate_column_separators(
+                path, n_columns, content_bounds=page.content_bounds
+            )
+            progress.setValue(i + 2)  # +1 for column estimation step
+            QCoreApplication.processEvents()
 
     def _on_columns_changed(self, n_columns: int) -> None:
         """Re-estimate separators for all pages when the column spinner changes."""
-        self._estimate_all_separators(n_columns)
+        total = len(self._ordered_paths)
+        if total > 5:
+            # Show progress for larger datasets
+            progress = QProgressDialog(
+                "Recalculating separators...", "Cancel", 0, total, self
+            )
+            progress.setWindowTitle("Processing")
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(200)
+            for i, path in enumerate(self._ordered_paths):
+                if progress.wasCanceled():
+                    break
+                page = self._pages[path]
+                page.column_separators = estimate_column_separators(
+                    path, n_columns, content_bounds=page.content_bounds
+                )
+                progress.setValue(i + 1)
+                QCoreApplication.processEvents()
+            progress.close()
+        else:
+            self._estimate_all_separators(n_columns)
         self._canvas.viewport().update()
 
     def _on_auto_segment_page(self) -> None:
@@ -220,6 +466,7 @@ class MainWindow(QMainWindow):
         added = auto_segment_page(
             page, offset, **self._auto_params(),
             separators=page.column_separators or None,
+            content_bounds=page.content_bounds or None,
         )
         self._canvas.clear_multi_selection()
         self._canvas.viewport().update()
@@ -240,12 +487,92 @@ class MainWindow(QMainWindow):
             total += auto_segment_page(
                 page, offset, **params,
                 separators=page.column_separators or None,
+                content_bounds=page.content_bounds or None,
             )
         self._canvas.clear_multi_selection()
         self._canvas.viewport().update()
         self._canvas.segments_changed.emit()
         self._status.showMessage(
             f"Auto-detected {total} segment{'s' if total != 1 else ''} across {len(self._ordered_paths)} pages."
+        )
+
+    def _on_add_segment_grid(self, n_rows: int) -> None:
+        """Create a grid of segments on the current page.
+        
+        Deletes all existing segments and creates n_rows segments per column,
+        where column width is determined by separators/content bounds.
+        """
+        page = self._canvas.current_page_data()
+        if not page:
+            QMessageBox.warning(self, "No Page", "Please select a page first.")
+            return
+        
+        # Get image dimensions
+        from PyQt6.QtGui import QPixmap
+        pixmap = QPixmap(page.file_path)
+        if pixmap.isNull():
+            return
+        img_w = pixmap.width()
+        img_h = pixmap.height()
+        
+        # Determine column boundaries
+        n_columns = self._settings.n_columns
+        
+        # Get content bounds or use full image width
+        if page.content_bounds:
+            left_bound, right_bound = page.content_bounds
+            # Use average of top/bottom for each bound
+            left_x = (left_bound[0] + left_bound[1]) / 2
+            right_x = (right_bound[0] + right_bound[1]) / 2
+        else:
+            left_x = 0
+            right_x = img_w
+        
+        # Build column x-positions from separators
+        column_edges = [left_x]
+        if page.column_separators:
+            for x_top, x_bot in page.column_separators:
+                sep_x = (x_top + x_bot) / 2
+                if left_x < sep_x < right_x:
+                    column_edges.append(sep_x)
+        column_edges.append(right_x)
+        column_edges.sort()
+        
+        # Clear existing segments
+        page.segments.clear()
+        
+        # Calculate row height
+        row_height = img_h / n_rows
+        
+        # Create segments
+        offset = self._settings.offset
+        for col_idx in range(len(column_edges) - 1):
+            col_left = column_edges[col_idx]
+            col_right = column_edges[col_idx + 1]
+            
+            for row_idx in range(n_rows):
+                y_top = row_idx * row_height
+                y_bot = (row_idx + 1) * row_height
+                
+                label = page.next_label(offset)
+                seg = Segment(
+                    label=label,
+                    vertices=[
+                        (col_left, y_top),   # top-left
+                        (col_right, y_top),  # top-right
+                        (col_right, y_bot),  # bottom-right
+                        (col_left, y_bot),   # bottom-left
+                    ]
+                )
+                page.segments.append(seg)
+        
+        self._canvas.clear_multi_selection()
+        self._canvas.viewport().update()
+        self._canvas.segments_changed.emit()
+        n_segs = len(page.segments)
+        self._status.showMessage(
+            f"Created {n_segs} segment{'s' if n_segs != 1 else ''} "
+            f"({n_rows} rows × {len(column_edges) - 1} column{'s' if len(column_edges) > 2 else ''})."
         )
 
     def _on_multi_delete(self, to_delete: dict) -> None:

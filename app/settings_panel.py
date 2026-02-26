@@ -32,6 +32,7 @@ class SettingsPanel(QWidget):
     auto_segment_page_clicked = pyqtSignal()
     auto_segment_all_clicked = pyqtSignal()
     relabel_page_clicked = pyqtSignal()
+    add_segment_grid_clicked = pyqtSignal(int)  # number of rows per column
     tool_changed = pyqtSignal(str)  # "select" | "segment"
     offset_changed = pyqtSignal(int)
     output_folder_changed = pyqtSignal(str)
@@ -218,6 +219,23 @@ class SettingsPanel(QWidget):
         self._btn_relabel.clicked.connect(self.relabel_page_clicked.emit)
         auto_action_layout.addWidget(self._btn_relabel)
 
+        # Segment grid row
+        grid_row = QHBoxLayout()
+        self._spin_grid_rows = QSpinBox()
+        self._spin_grid_rows.setRange(1, 100)
+        self._spin_grid_rows.setValue(10)
+        self._spin_grid_rows.setToolTip("Number of rows per column for segment grid")
+        grid_row.addWidget(self._spin_grid_rows)
+        self._btn_add_grid = QPushButton("Add Segment Grid")
+        self._btn_add_grid.setStyleSheet(_auto_btn_style)
+        self._btn_add_grid.setToolTip(
+            "Delete all segments and create a grid of segments.\n"
+            "Creates this many rows per column."
+        )
+        self._btn_add_grid.clicked.connect(self._on_add_segment_grid)
+        grid_row.addWidget(self._btn_add_grid)
+        auto_action_layout.addLayout(grid_row)
+
         layout.addWidget(auto_action_group)
 
         # ── Delete actions ───────────────────────────────────────────
@@ -352,3 +370,7 @@ class SettingsPanel(QWidget):
             self._output_folder = folder
             self._lbl_output.setText(folder)
             self.output_folder_changed.emit(folder)
+
+    def _on_add_segment_grid(self) -> None:
+        """Emit signal with the number of rows per column."""
+        self.add_segment_grid_clicked.emit(self._spin_grid_rows.value())
