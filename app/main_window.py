@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         # Thumbnail → canvas
         self._thumb_panel.folder_loaded.connect(self._on_folder_loaded)
         self._thumb_panel.page_selected.connect(self._on_page_selected)
+        self._thumb_panel.page_removed.connect(self._on_page_removed)
 
         # Settings → canvas / export
         self._settings.tool_changed.connect(self._canvas.set_tool)
@@ -137,6 +138,27 @@ class MainWindow(QMainWindow):
             self._status.showMessage(
                 f"Page {index + 1}/{len(self._ordered_paths)}: {path}"
             )
+
+    def _on_page_removed(self, index: int) -> None:
+        """Remove a page from the project (does not delete the file on disk)."""
+        if 0 <= index < len(self._ordered_paths):
+            path = self._ordered_paths.pop(index)
+            self._pages.pop(path, None)
+            self._canvas.clear_multi_selection(path)
+
+            remaining = len(self._ordered_paths)
+            if remaining == 0:
+                self._current_page_idx = -1
+                self._canvas._scene.clear()
+                self._canvas._pixmap_item = None
+                self._canvas._page_data = None
+                self._status.showMessage("All pages removed.")
+            else:
+                new_idx = min(index, remaining - 1)
+                self._thumb_panel.select_page(new_idx)
+                self._status.showMessage(
+                    f"Removed page. {remaining} page{'s' if remaining != 1 else ''} remaining."
+                )
 
     def _on_segment_selected(self, seg_idx: int) -> None:
         page = self._canvas.current_page_data()
