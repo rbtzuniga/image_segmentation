@@ -15,6 +15,8 @@ Here's a quick demo of the tool in action:
 - **Column-aware labeling** – segments are labeled in reading order (column by column, top to bottom)
 - **Column separators** – visual draggable separator lines between columns; supports tilted separators for skewed scans
 - **Relabel Page** – reassign labels to existing segments in reading order
+- **Multi-select** – Ctrl+click to select multiple segments, even across pages
+- **Combine segments** – pair two selected segments into a top/bottom unit that exports as one vertically-concatenated image
 - **Split segment** – split a selected segment horizontally into top/bottom halves
 - **Edge dragging** – drag any edge of a selected segment to resize it with parallel movement
 - Configurable label offset – new segments get labels `offset + i`
@@ -22,23 +24,54 @@ Here's a quick demo of the tool in action:
 - Right-click to toggle between Select and Segment tools
 - Delete/Backspace to remove selected segment
 - Press **S** to split the selected segment
+- Press **C** to combine two multi-selected segments
+- Press **U** to uncombine a combined segment
 - Press **R** to relabel the current page
 - Middle-click or left-click on empty space to pan the canvas
 - Export all segments as cropped images with configurable format (PNG / JPG / TIFF) and filename prefix
 
 ## Installation
 
-```bash
-pip install -r requirements.txt
-```
+### Prerequisites
 
-Requires Python 3.11+.
+- **Python 3.11 or newer** – Download from [python.org](https://www.python.org/downloads/). During installation on Windows, make sure to check **"Add Python to PATH"**.
+- **pip** – comes bundled with Python. You can verify it's available by running `pip --version` in a terminal.
+
+### Steps
+
+1. **Clone or download** this repository and open a terminal in the project folder.
+
+2. *(Recommended)* **Create a virtual environment** to keep dependencies isolated:
+
+   ```bash
+   python -m venv venv
+   ```
+
+   Then activate it:
+
+   - **Windows (cmd):** `venv\Scripts\activate`
+   - **Windows (PowerShell):** `venv\Scripts\Activate.ps1`
+   - **macOS / Linux:** `source venv/bin/activate`
+
+   You should see `(venv)` at the start of your terminal prompt.
+
+3. **Install dependencies:**
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   This installs PyQt6, Pillow, OpenCV, and NumPy.
+
+4. **Run the application:**
+
+   ```bash
+   python main.py
+   ```
+
+> **Troubleshooting:** If `python` is not recognized, try `python3` instead. On Windows, you can also use `py -3`.
 
 ## Usage
-
-```bash
-python main.py
-```
 
 ### Basic workflow
 
@@ -77,6 +110,26 @@ Click **Reset to Defaults** to restore all sliders to their original values.
 
 After manually adding, deleting, or rearranging segments, click **Relabel Page (press R)** or press **R** to reassign labels in column-aware reading order (left-to-right by column, top-to-bottom within each column), starting from the current label offset.
 
+### Multi-select
+
+Hold **Ctrl** and click segments to toggle them in and out of a multi-selection. Multi-selected segments can span different pages. Actions that operate on the selection (Delete, Combine) will apply to all multi-selected segments.
+
+- **Ctrl+click** a segment to add/remove it from the selection.
+- A normal click (without Ctrl) clears the multi-selection.
+
+### Combining segments
+
+Two segments can be paired into a **combined** top/bottom unit so that they export as a single vertically-concatenated image.
+
+1. **Ctrl+click** two segments (on the same page or different pages) to multi-select them.
+2. Click **Combine Selected (press C)** or press **C**.
+3. The segments are linked: the one with the smaller page number (or leftmost / topmost on the same page) becomes the **top** half, the other becomes the **bottom** half.
+4. Labels are automatically suffixed with `_top` and `_bottom`.
+5. Combined segments are drawn in **purple** to visually distinguish them from regular segments.
+6. On export, the pair is cropped separately, then stacked vertically (with white padding if widths differ) and saved as a single image under the top segment's page and base label.
+
+To **uncombine**, select either segment of a combined pair and click **Uncombine Selected (press U)** or press **U**. Both segments revert to independent segments with their original labels.
+
 ### Splitting segments
 
 Select a segment and click **Split Selected Segment (press S)** or press **S** to split it horizontally at its vertical midpoint, creating a top half and a bottom half.
@@ -99,6 +152,7 @@ In **Select** mode with a segment selected:
 ### UI color coding
 
 - **Light blue** buttons – auto-segment actions (Auto Segment Page, Auto Segment All Pages, Relabel Page)
+- **Purple** segments – combined segment pairs
 - **Light red** buttons – destructive actions (Delete Selected, Delete All Page, Delete All Pages)
 
 ### Keyboard & mouse shortcuts
@@ -106,8 +160,11 @@ In **Select** mode with a segment selected:
 | Action | Shortcut |
 |---|---|
 | Toggle Select / Segment tool | Right-click |
-| Delete selected segment | Delete or Backspace |
+| Delete selected segment(s) | Delete or Backspace |
 | Split selected segment | S |
+| Combine two selected segments | C |
+| Uncombine selected segment | U |
+| Multi-select toggle | Ctrl+click |
 | Relabel current page | R |
 | Pan canvas | Middle-click drag, or left-click drag on empty space (Select mode) |
 | Zoom | Scroll wheel |
