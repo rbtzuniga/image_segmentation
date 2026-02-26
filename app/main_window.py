@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QCoreApplication
 from PyQt6.QtWidgets import (
     QMainWindow,
     QHBoxLayout,
@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QStatusBar,
     QSplitter,
+    QProgressDialog,
 )
 
 from app.auto_segment import (
@@ -116,18 +117,40 @@ class MainWindow(QMainWindow):
             self._pages[fp] = PageData(file_path=fp)
         total = len(file_paths)
 
-        # Estimate column count from a sample of pages
-        if file_paths:
-            est = estimate_columns_sample(file_paths)
-            self._settings.n_columns = est
-            # Estimate separator positions for every page
-            self._estimate_all_separators(est)
-            self._status.showMessage(
-                f"Loaded {total} page{'s' if total != 1 else ''} "
-                f"(estimated {est} column{'s' if est != 1 else ''})."
-            )
-        else:
+        if not file_paths:
             self._status.showMessage(f"Loaded {total} page{'s' if total != 1 else ''}.")
+            return
+
+        # Show progress dialog for processing
+        progress = QProgressDialog(
+            "Processing pages...", "Cancel", 0, total + 1, self
+        )
+        progress.setWindowTitle("Loading")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)  # Show after 300ms
+        progress.setValue(0)
+        QCoreApplication.processEvents()
+
+        # Estimate column count from a sample of pages
+        progress.setLabelText("Estimating column layout...")
+        est = estimate_columns_sample(file_paths)
+        self._settings.n_columns = est
+        progress.setValue(1)
+        QCoreApplication.processEvents()
+
+        if progress.wasCanceled():
+            return
+
+        # Estimate separator positions for every page with progress
+        self._estimate_all_separators_with_progress(est, progress)
+
+        progress.setValue(total + 1)
+        progress.close()
+
+        self._status.showMessage(
+            f"Loaded {total} page{'s' if total != 1 else ''} "
+            f"(estimated {est} column{'s' if est != 1 else ''})."
+        )
 
     def _on_page_selected(self, index: int) -> None:
         if 0 <= index < len(self._ordered_paths):
@@ -212,9 +235,45 @@ class MainWindow(QMainWindow):
                 path, n_columns, content_bounds=page.content_bounds
             )
 
+    def _estimate_all_separators_with_progress(
+        self, n_columns: int, progress: QProgressDialog
+    ) -> None:
+        """Estimate separator positions with progress updates."""
+        for i, path in enumerate(self._ordered_paths):
+            if progress.wasCanceled():
+                break
+            progress.setLabelText(f"Processing page {i + 1} of {len(self._ordered_paths)}...")
+            page = self._pages[path]
+            page.content_bounds = estimate_content_bounds(path)
+            page.column_separators = estimate_column_separators(
+                path, n_columns, content_bounds=page.content_bounds
+            )
+            progress.setValue(i + 2)  # +1 for column estimation step
+            QCoreApplication.processEvents()
+
     def _on_columns_changed(self, n_columns: int) -> None:
         """Re-estimate separators for all pages when the column spinner changes."""
-        self._estimate_all_separators(n_columns)
+        total = len(self._ordered_paths)
+        if total > 5:
+            # Show progress for larger datasets
+            progress = QProgressDialog(
+                "Recalculating separators...", "Cancel", 0, total, self
+            )
+            progress.setWindowTitle("Processing")
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(200)
+            for i, path in enumerate(self._ordered_paths):
+                if progress.wasCanceled():
+                    break
+                page = self._pages[path]
+                page.column_separators = estimate_column_separators(
+                    path, n_columns, content_bounds=page.content_bounds
+                )
+                progress.setValue(i + 1)
+                QCoreApplication.processEvents()
+            progress.close()
+        else:
+            self._estimate_all_separators(n_columns)
         self._canvas.viewport().update()
 
     def _on_auto_segment_page(self) -> None:

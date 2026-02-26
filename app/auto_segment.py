@@ -145,6 +145,126 @@ def _vertical_gap(a: BBox, b: BBox) -> float:
     return b_top - a_bot
 
 
+# ── Binarization ─────────────────────────────────────────────────────────
+
+def _simple_binarize(img: np.ndarray) -> Tuple[np.ndarray, bool]:
+    """Fast binarization using Otsu. Returns (binary, success).
+    
+    Success is True if the foreground ratio is reasonable.
+    """
+    h, w = img.shape
+    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    fg_ratio = np.sum(binary > 0) / (h * w)
+    return binary, 0.005 <= fg_ratio <= 0.4
+
+
+def _robust_binarize_full(img: np.ndarray) -> np.ndarray:
+    """Full robust binarization for difficult images with shading."""
+    h, w = img.shape
+
+    # Background normalization using Gaussian blur (faster than morphology)
+    blur_size = max(w // 10, 51) | 1
+    background = cv2.GaussianBlur(img, (blur_size, blur_size), 0)
+    
+    # Normalize: divide image by background
+    normalized = cv2.divide(img, background, scale=255)
+
+    # Try Otsu on normalized
+    _, binary = cv2.threshold(normalized, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    fg_ratio = np.sum(binary > 0) / (h * w)
+    
+    if 0.005 <= fg_ratio <= 0.4:
+        return binary
+
+    # Fallback to adaptive thresholding
+    block_size = max(h // 40, 31) | 1
+    adaptive = cv2.adaptiveThreshold(
+        normalized, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        block_size, 8
+    )
+    return adaptive
+
+
+def _robust_binarize(img: np.ndarray) -> np.ndarray:
+    """Smart binarization: tries fast method first, falls back to robust."""
+    binary, success = _simple_binarize(img)
+    if success:
+        return binary
+    return _robust_binarize_full(img)
+
+
+# ── Image caching ────────────────────────────────────────────────────────
+
+# Cache for binarized images (avoids repeated processing of the same image)
+_binarize_cache: dict = {}
+_CACHE_MAX_SIZE = 5
+
+
+def _get_cached_binary(image_path: str) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    """Get cached (grayscale, binary) images, or load and cache them.
+    
+    Returns (grayscale, binary, height, width).
+    """
+    if image_path in _binarize_cache:
+        return _binarize_cache[image_path]
+    
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None, None, 0, 0
+    
+    h, w = img.shape
+    binary = _robust_binarize(img)
+    
+    # Maintain cache size
+    if len(_binarize_cache) >= _CACHE_MAX_SIZE:
+        # Remove oldest entry
+        oldest = next(iter(_binarize_cache))
+        del _binarize_cache[oldest]
+    
+    _binarize_cache[image_path] = (img, binary, h, w)
+    return img, binary, h, w
+
+
+def clear_binarize_cache():
+    """Clear the binarization cache."""
+    _binarize_cache.clear()
+
+
+# Target width for fast estimation (column/content bounds don't need full resolution)
+_ESTIMATION_WIDTH = 800
+
+
+def _get_fast_binary(image_path: str) -> Tuple[np.ndarray, int, int, float]:
+    """Get downscaled binary for fast estimation.
+    
+    Returns (binary, orig_height, orig_width, scale_factor).
+    """
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None, 0, 0, 1.0
+    
+    h, w = img.shape
+    
+    # Downscale if image is large
+    if w > _ESTIMATION_WIDTH:
+        scale = _ESTIMATION_WIDTH / w
+        new_w = _ESTIMATION_WIDTH
+        new_h = int(h * scale)
+        img_small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    else:
+        img_small = img
+        scale = 1.0
+    
+    # Use simple Otsu first (very fast on small images)
+    binary, success = _simple_binarize(img_small)
+    if not success:
+        binary = _robust_binarize_full(img_small)
+    
+    return binary, h, w, scale
+
+
 # ── Column estimation ────────────────────────────────────────────────────
 
 def estimate_columns(image_path: str) -> int:
@@ -156,13 +276,12 @@ def estimate_columns(image_path: str) -> int:
 
     Returns 1 if estimation fails or the image has a single column.
     """
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
+    # Use fast downscaled binary for estimation
+    binary, orig_h, orig_w, scale = _get_fast_binary(image_path)
+    if binary is None:
         return 1
 
-    h, w = img.shape
-    # Binarise – invert so text = white
-    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    h, w = binary.shape
 
     # Vertical projection: sum each column of pixels
     col_sums = np.sum(binary, axis=0) / 255  # number of text pixels per column
@@ -223,12 +342,12 @@ def estimate_column_separators(
     if n_columns <= 1:
         return []
 
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
+    # Use fast downscaled binary for estimation
+    binary, orig_h, orig_w, scale = _get_fast_binary(image_path)
+    if binary is None:
         return []
 
-    h, w = img.shape
-    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    h, w = binary.shape
 
     col_sums = np.sum(binary, axis=0) / 255
     kernel_size = max(w // 80, 5) | 1
@@ -236,12 +355,12 @@ def estimate_column_separators(
 
     n_seps = n_columns - 1
 
-    # Determine content area bounds
+    # Determine content area bounds (scale to match downscaled image)
     if content_bounds:
         left_bound, right_bound = content_bounds
-        # Use average of top/bottom for vertical lines
-        left_x = (left_bound[0] + left_bound[1]) / 2.0
-        right_x = (right_bound[0] + right_bound[1]) / 2.0
+        # Use average of top/bottom for vertical lines, scaled
+        left_x = (left_bound[0] + left_bound[1]) / 2.0 * scale
+        right_x = (right_bound[0] + right_bound[1]) / 2.0 * scale
     else:
         # Fallback: use 5% margins
         left_x = w * 0.05
@@ -250,10 +369,13 @@ def estimate_column_separators(
     content_width = right_x - left_x
 
     def _equidistant_separators() -> List[Tuple[float, float]]:
-        """Return separators equally spaced within content bounds."""
+        """Return separators equally spaced within content bounds (in original resolution)."""
+        # Calculate in original resolution
+        orig_left = left_x / scale if scale > 0 else left_x
+        orig_width = content_width / scale if scale > 0 else content_width
         return [
-            (left_x + content_width * (i + 1) / n_columns,
-             left_x + content_width * (i + 1) / n_columns)
+            (orig_left + orig_width * (i + 1) / n_columns,
+             orig_left + orig_width * (i + 1) / n_columns)
             for i in range(n_seps)
         ]
 
@@ -318,7 +440,9 @@ def estimate_column_separators(
         if low_confidence:
             return _equidistant_separators()
 
-        return [(x, x) for x in separators]
+        # Scale back to original resolution
+        inv_scale = 1.0 / scale if scale > 0 else 1.0
+        return [(x * inv_scale, x * inv_scale) for x in separators]
 
     # Didn't find enough separators — use equidistant
     return _equidistant_separators()
@@ -344,12 +468,12 @@ def estimate_content_bounds(image_path: str) -> Tuple[Tuple[float, float], Tuple
     Uses vertical projection profile to find where the content starts and ends.
     Returns ((left_top, left_bottom), (right_top, right_bottom)) — initially vertical.
     """
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
+    # Use fast downscaled binary for estimation
+    binary, orig_h, orig_w, scale = _get_fast_binary(image_path)
+    if binary is None:
         return ((0.0, 0.0), (100.0, 100.0))
 
-    h, w = img.shape
-    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    h, w = binary.shape
 
     col_sums = np.sum(binary, axis=0) / 255
     kernel_size = max(w // 80, 5) | 1
@@ -357,8 +481,8 @@ def estimate_content_bounds(image_path: str) -> Tuple[Tuple[float, float], Tuple
 
     mean_val = np.mean(smoothed)
     if mean_val < 1:
-        # No content detected, return small margins
-        return ((w * 0.05, w * 0.05), (w * 0.95, w * 0.95))
+        # No content detected, return small margins (in original resolution)
+        return ((orig_w * 0.05, orig_w * 0.05), (orig_w * 0.95, orig_w * 0.95))
 
     # Threshold for detecting content
     content_thresh = mean_val * 0.1
@@ -377,7 +501,12 @@ def estimate_content_bounds(image_path: str) -> Tuple[Tuple[float, float], Tuple
             right_x = min(w, i + 5)  # Small padding
             break
 
-    return ((float(left_x), float(left_x)), (float(right_x), float(right_x)))
+    # Scale back to original resolution
+    inv_scale = 1.0 / scale if scale > 0 else 1.0
+    left_x_orig = left_x * inv_scale
+    right_x_orig = right_x * inv_scale
+
+    return ((float(left_x_orig), float(left_x_orig)), (float(right_x_orig), float(right_x_orig)))
 
 
 def _sep_x_at_y(
@@ -486,19 +615,14 @@ def detect_paragraphs(
         ((left_top, left_bottom), (right_top, right_bottom)) content area bounds.
         Boxes that fall mostly outside these bounds will be filtered out.
     """
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
+    _, binary, h, w = _get_cached_binary(image_path)
+    if binary is None:
         return []
 
-    h, w = img.shape
-
-    # 1. Binarise (Otsu) – invert so text = white
-    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    # 2. Estimate line height and inter-line gap
+    # 1. Estimate line height and inter-line gap (binarization already done via cache)
     line_h, line_gap = _estimate_line_height(binary)
 
-    # 3. Light horizontal dilation to merge characters into words/short phrases
+    # 2. Light horizontal dilation to merge characters into words/short phrases
     #    Use half the line height — enough to connect characters within a word
     #    but NOT enough to bridge column gutters.
     #    When column count is known, cap the kernel to stay within a single column.
@@ -509,7 +633,7 @@ def detect_paragraphs(
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kern_w, 1))
     word_mask = cv2.dilate(binary, h_kernel, iterations=1)
 
-    # 4. Find word-level connected components
+    # 3. Find word-level connected components
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(word_mask, connectivity=8)
 
     # Collect word boxes (skip background label 0)
@@ -530,7 +654,7 @@ def detect_paragraphs(
     if not word_boxes:
         return []
 
-    # 5. Cluster word-boxes into paragraph blocks via Union-Find.
+    # 4. Cluster word-boxes into paragraph blocks via Union-Find.
     #    Two boxes belong to the same paragraph if:
     #    - They overlap horizontally by ≥ 30% (or horizontal gap is small)
     #    - Their vertical gap is small (within normal line spacing)
@@ -601,7 +725,7 @@ def detect_paragraphs(
             elif v_gap <= 0 and h_gap <= line_h * 1.5:
                 uf.union(i, j)
 
-    # 6. Build merged bounding boxes for each cluster
+    # 5. Build merged bounding boxes for each cluster
     clusters: dict[int, List[int]] = defaultdict(list)
     for i in range(n):
         clusters[uf.find(i)].append(i)
