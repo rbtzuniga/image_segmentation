@@ -6,6 +6,7 @@ import json
 from typing import Dict, List, Optional
 
 from PyQt6.QtCore import Qt, QCoreApplication
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QMainWindow,
     QHBoxLayout,
@@ -44,9 +45,11 @@ class MainWindow(QMainWindow):
         self._ordered_paths: List[str] = []
         self._current_page_idx: int = -1
         self._next_combined_id: int = 0
+        self._last_seg_file: Optional[str] = None
 
         self._build_ui()
         self._connect_signals()
+        self._setup_shortcuts()
 
     # ── UI construction ──────────────────────────────────────────────────
 
@@ -79,6 +82,8 @@ class MainWindow(QMainWindow):
         self._thumb_panel.folder_loaded.connect(self._on_folder_loaded)
         self._thumb_panel.page_selected.connect(self._on_page_selected)
         self._thumb_panel.page_removed.connect(self._on_page_removed)
+        self._thumb_panel.images_added.connect(self._on_images_added)
+        self._thumb_panel.order_changed.connect(self._on_order_changed)
         self._thumb_panel.save_segmentation_clicked.connect(self._on_save_segmentation)
         self._thumb_panel.load_segmentation_clicked.connect(self._on_load_segmentation)
 
@@ -112,6 +117,12 @@ class MainWindow(QMainWindow):
 
         # Re-estimate separators when column count changes
         self._settings.columns_spin.valueChanged.connect(self._on_columns_changed)
+
+    def _setup_shortcuts(self) -> None:
+        """Set up keyboard shortcuts for the main window."""
+        # Ctrl+S to quick-save segmentation
+        save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        save_shortcut.activated.connect(self._on_quick_save)
 
     # ── slots ────────────────────────────────────────────────────────────
 
@@ -189,8 +200,26 @@ class MainWindow(QMainWindow):
                     f"Removed page. {remaining} page{'s' if remaining != 1 else ''} remaining."
                 )
 
+    def _on_images_added(self, file_paths: list) -> None:
+        """Handle images added via 'Add Images' button."""
+        for fp in file_paths:
+            if fp not in self._pages:
+                self._ordered_paths.append(fp)
+                self._pages[fp] = PageData(file_path=fp)
+
+        count = len(self._ordered_paths)
+        self._status.showMessage(
+            f"Added {len(file_paths)} image{'s' if len(file_paths) != 1 else ''}. "
+            f"Total: {count} page{'s' if count != 1 else ''}."
+        )
+
+    def _on_order_changed(self, new_order: list) -> None:
+        """Handle reordering of pages via drag-and-drop."""
+        self._ordered_paths = new_order
+        self._status.showMessage("Page order updated.")
+
     def _on_save_segmentation(self) -> None:
-        """Save current session to a .seg file."""
+        """Save current session to a .seg file (with file dialog)."""
         if not self._ordered_paths:
             QMessageBox.warning(self, "No Data", "No pages loaded to save.")
             return
@@ -198,7 +227,7 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Segmentation",
-            "",
+            self._last_seg_file or "",
             "Segmentation Files (*.seg);;All Files (*)"
         )
         if not file_path:
@@ -208,6 +237,24 @@ class MainWindow(QMainWindow):
         if not file_path.lower().endswith(".seg"):
             file_path += ".seg"
 
+        if self._save_segmentation_to_file(file_path):
+            self._last_seg_file = file_path
+
+    def _on_quick_save(self) -> None:
+        """Quick save (Ctrl+S) – save to last file or prompt if none."""
+        if not self._ordered_paths:
+            self._status.showMessage("No data to save.")
+            return
+
+        if self._last_seg_file:
+            if self._save_segmentation_to_file(self._last_seg_file):
+                pass  # Status message already shown
+        else:
+            # No previous file – open Save As dialog
+            self._on_save_segmentation()
+
+    def _save_segmentation_to_file(self, file_path: str) -> bool:
+        """Save segmentation data to the specified file. Returns True on success."""
         # Build data structure
         data = {
             "version": 1,
@@ -251,9 +298,13 @@ class MainWindow(QMainWindow):
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-            self._status.showMessage(f"Saved segmentation to {file_path}")
+            from pathlib import Path
+            filename = Path(file_path).name
+            self._status.showMessage(f"Saved: {filename}", 5000)
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Save Error", f"Failed to save: {e}")
+            return False
 
     def _on_load_segmentation(self) -> None:
         """Load a session from a .seg file."""
@@ -437,6 +488,7 @@ class MainWindow(QMainWindow):
             f"Loaded {total} page{'s' if total != 1 else ''} with "
             f"{total_segs} segment{'s' if total_segs != 1 else ''} from {file_path}"
         )
+        self._last_seg_file = file_path
 
     def _on_segment_selected(self, seg_idx: int) -> None:
         page = self._canvas.current_page_data()

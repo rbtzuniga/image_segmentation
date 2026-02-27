@@ -39,6 +39,10 @@ class ThumbnailPanel(QWidget):
     page_removed = pyqtSignal(int)
     # Emitted when a new input folder is loaded.  Carries the list of file paths.
     folder_loaded = pyqtSignal(list)
+    # Emitted when images are added. Carries the list of new file paths.
+    images_added = pyqtSignal(list)
+    # Emitted when order changes due to drag/drop. Carries the new ordered list of file paths.
+    order_changed = pyqtSignal(list)
     # Emitted when the user clicks Save Segmentation
     save_segmentation_clicked = pyqtSignal()
     # Emitted when the user clicks Load Segmentation
@@ -68,6 +72,10 @@ class ThumbnailPanel(QWidget):
         self._btn_load_seg.clicked.connect(self.load_segmentation_clicked.emit)
         layout.addWidget(self._btn_load_seg)
 
+        self._btn_add_images = QPushButton("Add Images…")
+        self._btn_add_images.clicked.connect(self._on_add_images)
+        layout.addWidget(self._btn_add_images)
+
         self._label = QLabel("No folder loaded")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._label)
@@ -76,7 +84,10 @@ class ThumbnailPanel(QWidget):
         self._list.setIconSize(THUMB_SIZE)
         self._list.setSpacing(4)
         self._list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self._list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self._list.currentRowChanged.connect(self._on_row_changed)
+        self._list.model().rowsMoved.connect(self._on_rows_moved)
         layout.addWidget(self._list, stretch=1)
 
         self.setMinimumWidth(170)
@@ -177,6 +188,57 @@ class ThumbnailPanel(QWidget):
     def _on_row_changed(self, row: int) -> None:
         if row >= 0:
             self.page_selected.emit(row)
+
+    def _on_add_images(self) -> None:
+        """Open file dialog to add individual images."""
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add Images",
+            "",
+            "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp);;All Files (*)"
+        )
+        if not files:
+            return
+
+        added = []
+        for path_str in files:
+            path = Path(path_str)
+            if path_str in self._file_paths:
+                continue  # Already loaded
+            if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+
+            self._file_paths.append(path_str)
+            added.append(path_str)
+
+            pixmap = QPixmap(path_str)
+            if pixmap.isNull():
+                continue
+            thumb = pixmap.scaled(
+                THUMB_SIZE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+            item = QListWidgetItem(QIcon(thumb), path.name)
+            item.setSizeHint(QSize(THUMB_SIZE.width() + 10, THUMB_SIZE.height() + 24))
+            item.setToolTip(path_str)
+            self._list.addItem(item)
+
+        if added:
+            count = len(self._file_paths)
+            self._label.setText(f"{count} page{'s' if count != 1 else ''} loaded")
+            self.images_added.emit(added)
+
+    def _on_rows_moved(self) -> None:
+        """Handle drag-drop reordering: rebuild _file_paths from list order."""
+        new_order = []
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item:
+                new_order.append(item.toolTip())
+        self._file_paths = new_order
+        self.order_changed.emit(list(new_order))
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
