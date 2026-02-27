@@ -94,6 +94,7 @@ class MainWindow(QMainWindow):
         self._settings.auto_segment_page_clicked.connect(self._on_auto_segment_page)
         self._settings.auto_segment_all_clicked.connect(self._on_auto_segment_all)
         self._settings.relabel_page_clicked.connect(self._on_relabel_page)
+        self._settings.relabel_all_clicked.connect(self._on_relabel_all)
         self._settings.add_segment_grid_clicked.connect(self._on_add_segment_grid)
         self._settings.delete_segment_clicked.connect(self._canvas.delete_selected_segment)
         self._settings.split_segment_clicked.connect(self._canvas.split_selected_segment)
@@ -452,10 +453,17 @@ class MainWindow(QMainWindow):
                 verts = seg_d.get("vertices", [])
                 if len(verts) != 4:
                     continue
+                # Migrate old combined_ids: prefix with file path if not already
+                raw_cid = seg_d.get("combined_id")
+                if raw_cid and not raw_cid.startswith(fp):
+                    # Old format: just a number. Prefix with file path.
+                    combined_id = f"{fp}_{raw_cid}"
+                else:
+                    combined_id = raw_cid
                 seg = Segment(
                     label=seg_d.get("label", ""),
                     vertices=[(v[0], v[1]) for v in verts],
-                    combined_id=seg_d.get("combined_id"),
+                    combined_id=combined_id,
                     combined_role=seg_d.get("combined_role"),
                 )
                 page.segments.append(seg)
@@ -779,9 +787,11 @@ class MainWindow(QMainWindow):
         entries.sort(key=_sort_key)
         top_seg = entries[0][3]
         bottom_seg = entries[1][3]
+        top_fp = entries[0][1]  # file path of the top segment
 
         self._next_combined_id += 1
-        cid = str(self._next_combined_id)
+        # Include file path in combined_id to ensure uniqueness across pages
+        cid = f"{top_fp}_{self._next_combined_id}"
         base_label = top_seg.label
 
         top_seg.combined_id = cid
@@ -848,21 +858,54 @@ class MainWindow(QMainWindow):
         if not page.segments:
             QMessageBox.information(self, "No Segments", "There are no segments to relabel.")
             return
-        offset = self._settings.offset
-        n_columns = self._settings.n_columns
-        relabel_page(page, offset, n_columns,
-                     separators=page.column_separators or None)
-        # Update bottom partners (may be on other pages)
-        self._update_bottom_partners(page)
-        # Clear stale multi-selection (segment indices changed after sort)
-        self._canvas.clear_multi_selection()
-        self._canvas.select_segment(-1)
-        self._canvas.viewport().update()
-        self._canvas.segments_changed.emit()
+        self._do_relabel_current_page()
         self._status.showMessage(
             f"Relabelled {len(page.segments)} segment{'s' if len(page.segments) != 1 else ''} "
             f"on page {self._current_page_idx + 1}."
         )
+
+    def _on_relabel_all(self) -> None:
+        """Relabel all pages by calling _on_relabel_page for each."""
+        if not self._ordered_paths:
+            QMessageBox.warning(self, "No Pages", "Please load a folder first.")
+            return
+        
+        original_page_idx = self._current_page_idx
+        total = 0
+        
+        # For each page: select it, then call the exact same function as pressing R
+        for idx in range(len(self._ordered_paths)):
+            # Select page (same as clicking thumbnail)
+            self._on_page_selected(idx)
+            
+            page = self._canvas.current_page_data()
+            if page and page.segments:
+                total += len(page.segments)
+                # Call the exact same handler as pressing R
+                self._do_relabel_current_page()
+        
+        # Return to the original page
+        if 0 <= original_page_idx < len(self._ordered_paths):
+            self._on_page_selected(original_page_idx)
+        
+        self._status.showMessage(
+            f"Relabelled {total} segment{'s' if total != 1 else ''} across {len(self._ordered_paths)} pages."
+        )
+    
+    def _do_relabel_current_page(self) -> None:
+        """Core relabel logic, shared by _on_relabel_page and _on_relabel_all."""
+        page = self._canvas.current_page_data()
+        if not page or not page.segments:
+            return
+        offset = self._settings.offset
+        n_columns = self._settings.n_columns
+        relabel_page(page, offset, n_columns,
+                     separators=page.column_separators or None)
+        self._update_bottom_partners(page)
+        self._canvas.clear_multi_selection()
+        self._canvas.select_segment(-1)
+        self._canvas.viewport().update()
+        self._canvas.segments_changed.emit()
 
     def _update_bottom_partners(self, page: PageData) -> None:
         """After relabeling, update every bottom partner whose top lives on *page*."""

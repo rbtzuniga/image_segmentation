@@ -174,6 +174,19 @@ def export_all(
                     except ValueError as e:
                         base_label = top_seg.label.removesuffix("_top")
                         warnings.append(f"Page {top_pi + 1}, {base_label} (combined): {e}")
+                    continue
+                # Incomplete combined pair – export the available segment(s) as regular segments
+                # Use the current segment's label for a user-friendly message
+                base_label = seg.label.removesuffix("_top").removesuffix("_bottom")
+                warnings.append(f"Page {page_num}, {base_label} (combined pair incomplete); exporting available part(s) individually.")
+                for part_seg, part_pi in [(top_seg, top_pi), (bottom_seg, bottom_pi)]:
+                    if part_seg and part_pi is not None and len(part_seg.vertices) == 4:
+                        try:
+                            warped = crop_quadrilateral(pages[part_pi].file_path, part_seg.vertices)
+                            path = save_segment_image(warped, output_folder, prefix, part_pi + 1, part_seg.label, ext)
+                            saved.append(path)
+                        except ValueError as e:
+                            warnings.append(f"Page {part_pi + 1}, {part_seg.label}: {e}")
                 continue
 
             # Regular (non-combined) segment

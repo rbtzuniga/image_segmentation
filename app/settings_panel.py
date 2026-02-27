@@ -32,6 +32,7 @@ class SettingsPanel(QWidget):
     auto_segment_page_clicked = pyqtSignal()
     auto_segment_all_clicked = pyqtSignal()
     relabel_page_clicked = pyqtSignal()
+    relabel_all_clicked = pyqtSignal()
     add_segment_grid_clicked = pyqtSignal(int)  # number of rows per column
     tool_changed = pyqtSignal(str)  # "select" | "segment"
     offset_changed = pyqtSignal(int)
@@ -218,6 +219,15 @@ class SettingsPanel(QWidget):
         )
         self._btn_relabel.clicked.connect(self.relabel_page_clicked.emit)
         auto_action_layout.addWidget(self._btn_relabel)
+
+        self._btn_relabel_all = QPushButton("Relabel All Pages")
+        self._btn_relabel_all.setStyleSheet(_auto_btn_style)
+        self._btn_relabel_all.setToolTip(
+            "Re-label all segments on all pages\n"
+            "in column-aware reading order."
+        )
+        self._btn_relabel_all.clicked.connect(self.relabel_all_clicked.emit)
+        auto_action_layout.addWidget(self._btn_relabel_all)
 
         # Segment grid row
         grid_row = QHBoxLayout()
