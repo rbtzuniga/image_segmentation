@@ -2,9 +2,7 @@
 
 A Python GUI application for segmenting scanned document images into labeled regions. Supports automatic paragraph detection, column-aware labeling, and manual editing of quadrilateral segments.
 
-## Demo
-Here's a quick demo of the tool in action: 
-[Demo](https://www.dropbox.com/scl/fi/92zzuju8zt55cw2e8xuoj/img_seg_usage.mp4?rlkey=ua4o2ci2z8m5hz4tk5p77b8ms&st=r6y7j4lm&dl=0)
+
 
 ## Features
 
