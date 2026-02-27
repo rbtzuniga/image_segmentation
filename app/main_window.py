@@ -852,18 +852,23 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            saved = export_all(
+            saved, warnings = export_all(
                 pages=[self._pages[p] for p in self._ordered_paths],
                 output_folder=output,
                 prefix=self._settings.prefix,
                 ext=self._settings.image_format,
             )
-            QMessageBox.information(
-                self,
-                "Export Complete",
-                f"Saved {len(saved)} segment image{'s' if len(saved) != 1 else ''}.\n\n"
-                f"Output folder:\n{output}",
-            )
+            msg = f"Saved {len(saved)} segment image{'s' if len(saved) != 1 else ''}."
+            if warnings:
+                msg += f"\n\n{len(warnings)} segment(s) could not be exported:\n"
+                msg += "\n".join(warnings[:20])  # Limit display to first 20
+                if len(warnings) > 20:
+                    msg += f"\n... and {len(warnings) - 20} more"
+            msg += f"\n\nOutput folder:\n{output}"
+            if warnings:
+                QMessageBox.warning(self, "Export Complete with Warnings", msg)
+            else:
+                QMessageBox.information(self, "Export Complete", msg)
             self._status.showMessage(f"Exported {len(saved)} segments to {output}")
         except Exception as exc:
             QMessageBox.critical(self, "Export Error", f"An error occurred:\n{exc}")

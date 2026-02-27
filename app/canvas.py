@@ -46,6 +46,9 @@ FILL_COLOR_COMBINED = QColor(160, 0, 200, 60)
 FILL_COLOR_COMBINED_SELECTED = QColor(200, 80, 255, 70)
 LABEL_BG_COMBINED = QColor(160, 0, 200, 200)
 
+# Split line color (orange)
+SPLIT_LINE_COLOR = QColor(255, 140, 0, 200)
+
 
 class CanvasView(QGraphicsView):
     """Zoomable / pannable graphics view that hosts the canvas scene."""
@@ -94,6 +97,8 @@ class CanvasView(QGraphicsView):
         self._dragging_segment: bool = False  # whether we're dragging an entire segment
         self._drag_seg_last: Optional[QPointF] = None  # last mouse pos during segment drag
         self._multi_selected: Dict[str, Set[int]] = {}  # file_path → set of selected segment indices
+        self._split_mode: bool = False  # interactive split mode active
+        self._split_line_y: Optional[float] = None  # Y position of split preview line (scene coords)
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -158,7 +163,34 @@ class CanvasView(QGraphicsView):
         self.viewport().update()
 
     def split_selected_segment(self) -> None:
-        """Split the selected segment horizontally at its vertical midpoint."""
+        """Enter interactive split mode for the selected segment."""
+        if not self._page_data or not (0 <= self._active_segment_idx < len(self._page_data.segments)):
+            return
+        seg = self._page_data.segments[self._active_segment_idx]
+        if len(seg.vertices) != 4:
+            return
+
+        # Toggle split mode
+        if self._split_mode:
+            self._cancel_split_mode()
+        else:
+            self._split_mode = True
+            # Initialize split line at vertical center of the segment
+            tl, tr, br, bl = seg.vertices
+            mid_y = (tl[1] + bl[1]) / 2.0
+            self._split_line_y = mid_y
+            self.setCursor(Qt.CursorShape.SplitVCursor)
+            self.viewport().update()
+
+    def _cancel_split_mode(self) -> None:
+        """Exit split mode without splitting."""
+        self._split_mode = False
+        self._split_line_y = None
+        self.setCursor(Qt.CursorShape.ArrowCursor if self._tool == "select" else Qt.CursorShape.CrossCursor)
+        self.viewport().update()
+
+    def _perform_split_at_y(self, split_y: float) -> None:
+        """Split the selected segment at the given Y coordinate."""
         if not self._page_data or not (0 <= self._active_segment_idx < len(self._page_data.segments)):
             return
         seg = self._page_data.segments[self._active_segment_idx]
@@ -168,9 +200,27 @@ class CanvasView(QGraphicsView):
         # Vertices: TL(0), TR(1), BR(2), BL(3)
         tl, tr, br, bl = seg.vertices
 
-        # Midpoints of left and right edges
-        ml = ((tl[0] + bl[0]) / 2.0, (tl[1] + bl[1]) / 2.0)
-        mr = ((tr[0] + br[0]) / 2.0, (tr[1] + br[1]) / 2.0)
+        # Clamp split_y to within the segment bounds
+        top_y = min(tl[1], tr[1])
+        bot_y = max(bl[1], br[1])
+        split_y = max(top_y + 1, min(split_y, bot_y - 1))
+
+        # Calculate split points on left and right edges
+        # Left edge: interpolate between TL and BL
+        if abs(bl[1] - tl[1]) > 0.001:
+            t_left = (split_y - tl[1]) / (bl[1] - tl[1])
+            ml_x = tl[0] + t_left * (bl[0] - tl[0])
+        else:
+            ml_x = (tl[0] + bl[0]) / 2.0
+        ml = (ml_x, split_y)
+
+        # Right edge: interpolate between TR and BR
+        if abs(br[1] - tr[1]) > 0.001:
+            t_right = (split_y - tr[1]) / (br[1] - tr[1])
+            mr_x = tr[0] + t_right * (br[0] - tr[0])
+        else:
+            mr_x = (tr[0] + br[0]) / 2.0
+        mr = (mr_x, split_y)
 
         # Top half: TL, TR, MR, ML
         top_seg = Segment(
@@ -189,9 +239,9 @@ class CanvasView(QGraphicsView):
         self._page_data.segments.insert(idx + 1, bot_seg)
 
         self._active_segment_idx = idx  # keep top selected
+        self._cancel_split_mode()
         self.segments_changed.emit()
         self.segment_selected.emit(idx)
-        self.viewport().update()
 
     def _separator_at(self, img_x: float, img_y: float) -> tuple:
         """Return (separator_index, endpoint) near (img_x, img_y), or (-1, '').
@@ -359,6 +409,12 @@ class CanvasView(QGraphicsView):
 
         img_x, img_y = pos.x(), pos.y()
 
+        # Handle split mode click
+        if self._split_mode:
+            if self._split_line_y is not None:
+                self._perform_split_at_y(self._split_line_y)
+            return
+
         if self._tool == "select":
             ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
 
@@ -484,6 +540,20 @@ class CanvasView(QGraphicsView):
             self.segments_changed.emit()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        # Handle split mode - update split line position
+        if self._split_mode and self._page_data:
+            pos = self.mapToScene(event.pos())
+            if 0 <= self._active_segment_idx < len(self._page_data.segments):
+                seg = self._page_data.segments[self._active_segment_idx]
+                if len(seg.vertices) == 4:
+                    tl, tr, br, bl = seg.vertices
+                    top_y = min(tl[1], tr[1])
+                    bot_y = max(bl[1], br[1])
+                    # Clamp to segment bounds
+                    self._split_line_y = max(top_y + 1, min(pos.y(), bot_y - 1))
+                    self.viewport().update()
+            return
+
         if self._dragging_separator >= 0 and self._page_data:
             pos = self.mapToScene(event.pos())
             new_x = pos.x()
@@ -696,7 +766,10 @@ class CanvasView(QGraphicsView):
     # ── keyboard handling ────────────────────────────────────────────────
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
-        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+        if event.key() == Qt.Key.Key_Escape:
+            if self._split_mode:
+                self._cancel_split_mode()
+        elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.delete_selected_segment()
         elif event.key() == Qt.Key.Key_S:
             self.split_selected_segment()
@@ -798,6 +871,34 @@ class CanvasView(QGraphicsView):
             is_active = i == self._active_segment_idx
             is_selected = i in page_selected
             self._paint_segment(painter, seg, is_active, is_selected)
+
+        # Draw split preview line
+        if self._split_mode and self._split_line_y is not None and self._pixmap_item:
+            if 0 <= self._active_segment_idx < len(self._page_data.segments):
+                seg = self._page_data.segments[self._active_segment_idx]
+                if len(seg.vertices) == 4:
+                    tl, tr, br, bl = seg.vertices
+                    # Calculate X positions at split_y by interpolating edges
+                    split_y = self._split_line_y
+                    # Left edge
+                    if abs(bl[1] - tl[1]) > 0.001:
+                        t_left = (split_y - tl[1]) / (bl[1] - tl[1])
+                        left_x = tl[0] + t_left * (bl[0] - tl[0])
+                    else:
+                        left_x = (tl[0] + bl[0]) / 2.0
+                    # Right edge
+                    if abs(br[1] - tr[1]) > 0.001:
+                        t_right = (split_y - tr[1]) / (br[1] - tr[1])
+                        right_x = tr[0] + t_right * (br[0] - tr[0])
+                    else:
+                        right_x = (tr[0] + br[0]) / 2.0
+                    
+                    left_pt = QPointF(self.mapFromScene(QPointF(left_x, split_y)))
+                    right_pt = QPointF(self.mapFromScene(QPointF(right_x, split_y)))
+                    pen = QPen(SPLIT_LINE_COLOR, 3)
+                    pen.setCosmetic(True)
+                    painter.setPen(pen)
+                    painter.drawLine(left_pt, right_pt)
 
         painter.end()
 

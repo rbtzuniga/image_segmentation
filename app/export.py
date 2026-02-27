@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from app.segment import PageData, Segment
+from app.segment import PageData
 
 
 def _order_points(pts: np.ndarray) -> np.ndarray:
@@ -128,13 +128,17 @@ def export_all(
     output_folder: str,
     prefix: str = "segment",
     ext: str = "png",
-) -> List[str]:
-    """Export every segment from every page. Returns list of saved file paths.
+) -> Tuple[List[str], List[str]]:
+    """Export every segment from every page.
+
+    Returns a tuple of (saved_file_paths, warnings).
+    Warnings list contains entries for segments that failed to export.
 
     Combined segment pairs are exported as a single vertically-concatenated
     image using the top segment's page number and base label.
     """
     saved: List[str] = []
+    warnings: List[str] = []
     exported_combined: set = set()  # combined_ids already exported
 
     for page_idx, page in enumerate(pages):
@@ -152,24 +156,31 @@ def export_all(
                     pages, seg.combined_id,
                 )
                 if top_seg and bottom_seg and top_pi is not None and bottom_pi is not None:
-                    top_img = crop_quadrilateral(
-                        pages[top_pi].file_path, top_seg.vertices,
-                    )
-                    bottom_img = crop_quadrilateral(
-                        pages[bottom_pi].file_path, bottom_seg.vertices,
-                    )
-                    combined_img = _vstack_with_padding(top_img, bottom_img)
-                    base_label = top_seg.label.removesuffix("_top")
-                    combined_page_num = top_pi + 1
-                    path = save_segment_image(
-                        combined_img, output_folder, prefix,
-                        combined_page_num, base_label, ext,
-                    )
-                    saved.append(path)
+                    try:
+                        top_img = crop_quadrilateral(
+                            pages[top_pi].file_path, top_seg.vertices,
+                        )
+                        bottom_img = crop_quadrilateral(
+                            pages[bottom_pi].file_path, bottom_seg.vertices,
+                        )
+                        combined_img = _vstack_with_padding(top_img, bottom_img)
+                        base_label = top_seg.label.removesuffix("_top")
+                        combined_page_num = top_pi + 1
+                        path = save_segment_image(
+                            combined_img, output_folder, prefix,
+                            combined_page_num, base_label, ext,
+                        )
+                        saved.append(path)
+                    except ValueError as e:
+                        base_label = top_seg.label.removesuffix("_top")
+                        warnings.append(f"Page {top_pi + 1}, {base_label} (combined): {e}")
                 continue
 
             # Regular (non-combined) segment
-            warped = crop_quadrilateral(page.file_path, seg.vertices)
-            path = save_segment_image(warped, output_folder, prefix, page_num, seg.label, ext)
-            saved.append(path)
-    return saved
+            try:
+                warped = crop_quadrilateral(page.file_path, seg.vertices)
+                path = save_segment_image(warped, output_folder, prefix, page_num, seg.label, ext)
+                saved.append(path)
+            except ValueError as e:
+                warnings.append(f"Page {page_num}, {seg.label}: {e}")
+    return saved, warnings
