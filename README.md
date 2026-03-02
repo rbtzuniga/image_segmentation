@@ -44,6 +44,12 @@ A Python GUI application for segmenting scanned document images into labeled reg
 
 1. **Clone or download** this repository and open a terminal in the project folder.
 
+2. Open a **terminal** and set the project folder as the current directory. For example
+   
+   ```bash
+   cd C:\image_segmentation\
+   ```
+
 2. *(Recommended)* **Create a virtual environment** to keep dependencies isolated:
 
    ```bash
